@@ -129,9 +129,20 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
     def ddim_sample(self, backbone_feats, images_whwh, points, clip_denoised=True, do_postprocess=True):
         w, h = 1600, 1408
         batch = points.shape[0]
+        shape = (batch, self.num_proposals, 5)
         total_timesteps, sampling_timesteps, eta = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta
 
-        
+        # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        times = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)
+        times = list(reversed(times.int().tolist()))
+        time_pairs = list(zip(times[:-1], times[1:]))  # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+
+        img = torch.randn(shape, device=self.device)
+
+        ensemble_score, ensemble_label, ensemble_coord = [], [], []
+        x_start = None
+        for time, time_next in time_pairs:
+            pass
 
     @torch.no_grad()
     @force_fp32()
