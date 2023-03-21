@@ -33,6 +33,13 @@ def lidabev2img(bboxes):
 
     return bev_bboxes
 
+def exists(x):
+    return x is not None
+
+def default(val, d):
+    if exists(val):
+        return val
+    return d() if callable(d) else d
 
 def cosine_beta_schedule(timesteps, s=0.008):
     """
@@ -77,6 +84,10 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
 
         self.scale = 2.0
 
+        self.sampling_timesteps = default(sampling_timesteps, timesteps)
+        self.ddim_sampling_eta = 1.
+        
+
         self.register_buffer('betas', betas)
         self.register_buffer('alphas_cumprod', alphas_cumprod)
         self.register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
@@ -115,8 +126,10 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
         
     @torch.no_grad()
-    def ddim_sample(self, ):
-        pass
+    def ddim_sample(self, backbone_feats, images_whwh, points, clip_denoised=True, do_postprocess=True):
+        batch = points.shape[0]
+        total_timesteps, sampling_timesteps, eta = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta
+        
 
     @torch.no_grad()
     @force_fp32()
@@ -252,7 +265,14 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         return losses
         
     def simple_test(self, points, img_metas, img=None, rescale=False):
-        return super().simple_test(points, img_metas, img, rescale)
+        img_feats, pts_feats = self.extract_feat(
+            points, img=img, img_metas=img_metas)
+        
+        fuse_feats = pts_feats
+        fuse_feats = [fuse_feats]
+
+        results = self.ddim_sample()
+        return results
 
     def aug_test(self, points, img_metas, imgs=None, rescale=False):
         return super().aug_test(points, img_metas, imgs, rescale)
