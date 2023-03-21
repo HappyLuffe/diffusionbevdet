@@ -41,11 +41,16 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
     def forward_train(self, 
                       x,
                       proposal_list,
-                      gt_bboxes,
-                      gt_labels,
+                      gt_bboxes=None,
+                      gt_labels=None,
                       gt_bboxes_ignore=None,
                       gt_masks=None,
                       t=None):
+        if gt_bboxes is None:
+            bbox_results = self._bbox_forward_train(x, sampling_results,
+                                                    gt_bboxes, gt_labels)
+            return bbox_results
+        
         if self.with_bbox:
             num_pts = len(proposal_list)
             if gt_bboxes_ignore is None:
@@ -78,4 +83,4 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
                                                     gt_bboxes, gt_labels)
             losses.update(bbox_results['loss_bbox'])
 
-        return losses, bbox_results
+        return losses

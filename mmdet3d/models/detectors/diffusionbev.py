@@ -70,7 +70,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         super(DiffusionBEVDetector, self).__init__(**kwargs)
         # self.voxel_layer = Voxelization((**voxel_layer))
         timesteps = 1000
-        sampling_timesteps = 1000
+        sampling_timesteps = 1 # 后续需要改为在配置文件中说明
 
         self.device = torch.device('cuda')
 
@@ -127,8 +127,10 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         
     @torch.no_grad()
     def ddim_sample(self, backbone_feats, images_whwh, points, clip_denoised=True, do_postprocess=True):
+        w, h = 1600, 1408
         batch = points.shape[0]
         total_timesteps, sampling_timesteps, eta = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta
+
         
 
     @torch.no_grad()
@@ -260,7 +262,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
 
         losses = dict()
 
-        roi_losses, _  = self.pts_bbox_head.forward_train(fuse_feats, d_boxes, gt_bev_boxes, gt_labels, d_t)
+        roi_losses = self.pts_bbox_head.forward_train(fuse_feats, d_boxes, gt_bev_boxes, gt_labels, d_t)
         losses.update(roi_losses)
         return losses
         
@@ -271,7 +273,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         fuse_feats = pts_feats
         fuse_feats = [fuse_feats]
 
-        results = self.ddim_sample()
+        results = self.ddim_sample(fuse_feats, None, points)
         return results
 
     def aug_test(self, points, img_metas, imgs=None, rescale=False):
