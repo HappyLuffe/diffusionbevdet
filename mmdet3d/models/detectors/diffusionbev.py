@@ -218,39 +218,41 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         
         # 暂时只使用单模态的数据
         # pts_feats.shape = [2, 256, 200, 176]
-        fuse_feats = [pts_feats]
+        fuse_feats = pts_feats
+        fuse_feats = [fuse_feats]
         
-        if not self.training:
-            results = self.ddim_sample()
-            return results
+        res = multi_apply(self.forward_single, gt_bboxes_3d, gt_labels_3d)
+        # d_boxes, d_noise, d_t为list，大小为batch size
+        # [XYWHR]
+        d_boxes = [i.cuda() for i in res[0]] # proposal
+        d_noise = [i.cuda() for i in res[1]]
+        d_t = [i.cuda() for i in res[2]]
+        gt_bev_boxes = [i.cuda() for i in res[3]]
+        gt_labels = [i.cuda() for i in res[4]]
+
+        batch_size = len(gt_labels)
+        for i in range(batch_size):
+            gt_label = gt_labels[i]
+            gt_bev_box = gt_bev_boxes[i]
+            index = 0
+            for label in gt_label:
+                if label.item() == -1:
+                    gt_label = del_tensor_ele(gt_label, index)
+                    gt_bev_box = del_tensor_ele(gt_bev_box, index)
+                index += 1
+            gt_labels[i] = gt_label
+            gt_bev_boxes[i] = gt_bev_box
+
+        gt_bev_boxes = lidabev2img(gt_bev_boxes)
+
+        losses = dict()
+
+        roi_losses, _  = self.pts_bbox_head.forward_train(fuse_feats, d_boxes, gt_bev_boxes, gt_labels, d_t)
+        losses.update(roi_losses)
+        return losses
         
-        if self.training:
-            res = multi_apply(self.forward_single, gt_bboxes_3d, gt_labels_3d)
-            # d_boxes, d_noise, d_t为list，大小为batch size
-            # [XYWHR]
-            d_boxes = [i.cuda() for i in res[0]] # proposal
-            d_noise = [i.cuda() for i in res[1]]
-            d_t = [i.cuda() for i in res[2]]
-            gt_bev_boxes = [i.cuda() for i in res[3]]
-            gt_labels = [i.cuda() for i in res[4]]
+    def simple_test(self, points, img_metas, img=None, rescale=False):
+        return super().simple_test(points, img_metas, img, rescale)
 
-            batch_size = len(gt_labels)
-            for i in range(batch_size):
-                gt_label = gt_labels[i]
-                gt_bev_box = gt_bev_boxes[i]
-                index = 0
-                for label in gt_label:
-                    if label.item() == -1:
-                        gt_label = del_tensor_ele(gt_label, index)
-                        gt_bev_box = del_tensor_ele(gt_bev_box, index)
-                    index += 1
-                gt_labels[i] = gt_label
-                gt_bev_boxes[i] = gt_bev_box
-
-            gt_bev_boxes = lidabev2img(gt_bev_boxes)
-
-            losses = dict()
-
-            roi_losses, _  = self.pts_bbox_head.forward_train(fuse_feats, d_boxes, gt_bev_boxes, gt_labels, d_t)
-            losses.update(roi_losses)
-            return losses
+    def aug_test(self, points, img_metas, imgs=None, rescale=False):
+        return super().aug_test(points, img_metas, imgs, rescale)
