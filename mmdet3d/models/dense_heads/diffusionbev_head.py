@@ -141,7 +141,23 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
 
         det_bboxes = []
         det_labels = []
+
+        batch_size = len(proposals)
+        w, h = 1600, 1408
+        img_shapes = tuple((w, h) for i in range(batch_size))
+        scale_factors = tuple([1., 1., 1., 1.] for i in range(batch_size))
+
         for i in range(len(proposals)):
-            pass
+            det_bbox, det_label = self.bbox_head.get_bboxes(
+                rois[i],
+                cls_score[i],
+                bbox_pred[i],
+                img_shapes,
+                scale_factors,
+                rescale=rescale,
+                cfg=test_cfg)
+            det_bboxes.append(det_bbox)
+            det_labels.append(det_label)
+        return det_bboxes, det_labels
 
     

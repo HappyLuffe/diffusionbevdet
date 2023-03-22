@@ -16,6 +16,9 @@ from .base import Base3DDetector
 from .mvx_two_stage import MVXTwoStageDetector
 import math
 import numpy as np
+from collections import namedtuple
+
+ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
 def lidabev2img(bboxes):
     bev_bboxes = bboxes
@@ -148,6 +151,8 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         x_start = torch.clamp(x_start, min=-1 * self.scale, max=self.scale)
         pred_noise = self.predict_noise_from_start(x, t, x_start)
 
+        return ModelPrediction(pred_noise, x_start), outputs_class, outputs_coord
+
         
 
 
@@ -171,7 +176,43 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         x_start = None
         for time, time_next in time_pairs:
             time_cond = torch.full((batch,), time, device=self.device, dtype=torch.long)
-            self.cond = x_start if self.self_condition else None
+            self_cond = x_start if self.self_condition else None
+            preds, outputs_class, outputs_coord = self.model_predictions(backbone_feats, images_whwh, img, time_cond, self_cond, clip_denoised)
+            pred_noise, x_start = preds.pred_noise, preds.pred_x_start
+
+            if self.box_renewal:
+                score_per_image, box_per_image = outputs_class[-1][0], outputs_coord[-1][0]
+                threshold = 0.5
+                score_per_image = torch.sigmoid(score_per_image)
+                value, _ = torch.max(score_per_image, -1, keepdim=False)
+                keep_idx = value > threshold
+                num_remain = torch.sum(keep_idx)
+
+                pred_noise = pred_noise[:, keep_idx, :]
+                x_start = x_start[:, keep_idx, :]
+                img = img[:, keep_idx, :]
+
+            if time_next < 0:
+                img = x_start
+                continue
+
+            alpha = self.alphas_cumprod[time]
+            alpha_next = self.alphas_cumprod[time_next]
+
+            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            c = (1 - alpha_next - sigma ** 2).sqrt()
+
+            noise = torch.randn_like(img)
+
+            img = x_start * alpha_next.sqrt() + \
+                  c * pred_noise + \
+                  sigma * noise
+
+            if self.box_renewal:
+                img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
+            
+    def inference(self,):
+        pass
 
 
     @torch.no_grad()
