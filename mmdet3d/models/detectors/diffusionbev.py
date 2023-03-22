@@ -85,7 +85,12 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         self.scale = 2.0
 
         self.sampling_timesteps = default(sampling_timesteps, timesteps)
+        assert self.sampling_timesteps <= timesteps
+        self.is_ddim_sampling = self.sampling_timesteps < timesteps
         self.ddim_sampling_eta = 1.
+        self.self_condition = False
+        self.box_renewal = True
+        self.use_ensemble = True
         
 
         self.register_buffer('betas', betas)
@@ -125,10 +130,33 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         
         return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
         
+    def predict_noise_from_start(self, x_t, t, x0):
+        return (
+                (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) /
+                extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
+        )
+
+    def model_predictions(self, backbone_feats, images_whwh, x, t, x_self_cond=None, clip_x_start=False):
+        x_boxes = torch.clamp(x, min=-1 * self.scale, max=self.scale)
+        x_boxes = ((x_boxes / self.scale) + 1) / 2
+        x_boxes = x_boxes * images_whwh[:, None, :]        
+        outputs_class, outputs_coord = self.pts_bbox_head.simple_test(backbone_feats, x_boxes, t)
+
+        x_start = outputs_coord[-1]
+        x_start = x_start / images_whwh[:, None, :]
+        x_start = (x_start * 2 - 1.) * self.scale
+        x_start = torch.clamp(x_start, min=-1 * self.scale, max=self.scale)
+        pred_noise = self.predict_noise_from_start(x, t, x_start)
+
+        
+
+
     @torch.no_grad()
     def ddim_sample(self, backbone_feats, images_whwh, points, clip_denoised=True, do_postprocess=True):
         w, h = 1600, 1408
         batch = points.shape[0]
+        images_whwh = torch.tensor([w, h, w, h, 2 * math.pi]).repeat(batch, 1)
+
         shape = (batch, self.num_proposals, 5)
         total_timesteps, sampling_timesteps, eta = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta
 
@@ -142,7 +170,9 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         ensemble_score, ensemble_label, ensemble_coord = [], [], []
         x_start = None
         for time, time_next in time_pairs:
-            pass
+            time_cond = torch.full((batch,), time, device=self.device, dtype=torch.long)
+            self.cond = x_start if self.self_condition else None
+
 
     @torch.no_grad()
     @force_fp32()
