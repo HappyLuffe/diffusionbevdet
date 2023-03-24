@@ -30,6 +30,7 @@ dataset_type = 'KittiDataset'
 data_root = '../dataset/kitti/'################<----在此处调整数据集目录########
 ########################################################################################
 class_names = ['Pedestrian', 'Cyclist', 'Car']
+file_client_args = dict(backend='disk')
 img_norm_cfg = dict(
     mean=[103.530, 116.280, 123.675], std=[1.0, 1.0, 1.0], to_rgb=False)
 input_modality = dict(use_lidar=True, use_camera=False)

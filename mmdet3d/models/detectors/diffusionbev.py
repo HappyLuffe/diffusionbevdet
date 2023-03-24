@@ -17,6 +17,7 @@ from .mvx_two_stage import MVXTwoStageDetector
 import math
 import numpy as np
 from collections import namedtuple
+from mmcv.ops.nms import batched_nms
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
@@ -94,6 +95,9 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         self.self_condition = False
         self.box_renewal = True
         self.use_ensemble = True
+        self.use_focal = True
+        self.use_fed_loss = False
+        self.use_nms = True
         
 
         self.register_buffer('betas', betas)
@@ -207,12 +211,40 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             img = x_start * alpha_next.sqrt() + \
                   c * pred_noise + \
                   sigma * noise
-
+            
+            img_sizes = torch.tensor([w, h]).repeat(batch,1)
             if self.box_renewal:
                 img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
+            if self.use_ensemble and self.sampling_timesteps > 1:
+                box_pred_per_image, scores_per_image, labels_per_image = self.inference(outputs_class[-1],
+                                                                                        outputs_coord[-1],
+                                                                                        img_sizes)
             
-    def inference(self,):
-        pass
+    def inference(self, box_cls, box_pred, image_sizes):
+        assert len(box_cls) == len(image_sizes)
+        results = []
+        if self.use_focal or self.use_fed_loss:
+            scores = torch.sigmoid(box_cls)
+            labels = torch.arange(self.num_classes, device=self.device). \
+                unsqueeze(0).repeat(self.num_proposals, 1).flatten(0, 1)
+
+            for i, (scores_per_image, box_pred_per_image, image_size) in enumerate(zip(
+                    scores, box_pred, image_sizes
+            )):
+                # result = Instances(image_size)
+                scores_per_image, topk_indices = scores_per_image.flatten(0, 1).topk(self.num_proposals, sorted=False)
+                labels_per_image = labels[topk_indices]
+                box_pred_per_image = box_pred_per_image.view(-1, 1, 4).repeat(1, self.num_classes, 1).view(-1, 4)
+                box_pred_per_image = box_pred_per_image[topk_indices]
+
+                if self.use_ensemble and self.sampling_timesteps > 1:
+                    return box_pred_per_image, scores_per_image, labels_per_image
+
+                if self.use_nms:
+                    _, keep = batched_nms(box_pred_per_image, scores_per_image, labels_per_image, dict(type='nms', iou_threshold=0.5))
+                    box_pred_per_image = box_pred_per_image[keep]
+                    scores_per_image = scores_per_image[keep]
+                    labels_per_image = labels_per_image[keep]
 
 
     @torch.no_grad()
