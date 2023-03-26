@@ -149,7 +149,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         x_boxes = x_boxes * images_whwh[:, None, :]        
         outputs_class, outputs_coord = self.pts_bbox_head.simple_test(backbone_feats, x_boxes, t)
 
-        x_start = outputs_coord[-1]
+        x_start = outputs_coord
         x_start = x_start / images_whwh[:, None, :]
         x_start = (x_start * 2 - 1.) * self.scale
         x_start = torch.clamp(x_start, min=-1 * self.scale, max=self.scale)
@@ -169,14 +169,15 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         shape = (batch, self.num_proposals, 5)
         total_timesteps, sampling_timesteps, eta = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta
 
-        # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        # *[-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
         times = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)
         times = list(reversed(times.int().tolist()))
-        time_pairs = list(zip(times[:-1], times[1:]))  # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+        time_pairs = list(zip(times[:-1], times[1:]))  # *[(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
 
+        # *初始噪声框
         img = torch.randn(shape, device=self.device)
 
-        ensemble_score, ensemble_label, ensemble_coord = [], [], []
+        # ensemble_score, ensemble_label, ensemble_coord = [], [], []
         x_start = None
         for time, time_next in time_pairs:
             time_cond = torch.full((batch,), time, device=self.device, dtype=torch.long)
@@ -185,7 +186,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             pred_noise, x_start = preds.pred_noise, preds.pred_x_start
 
             if self.box_renewal:
-                score_per_image, box_per_image = outputs_class[-1][0], outputs_coord[-1][0]
+                score_per_image, box_per_image = outputs_class[0], outputs_coord[0]
                 threshold = 0.5
                 score_per_image = torch.sigmoid(score_per_image)
                 value, _ = torch.max(score_per_image, -1, keepdim=False)
@@ -199,7 +200,6 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             if time_next < 0:
                 img = x_start
                 continue
-
             alpha = self.alphas_cumprod[time]
             alpha_next = self.alphas_cumprod[time_next]
 
@@ -214,37 +214,38 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             
             img_sizes = torch.tensor([w, h]).repeat(batch,1)
             if self.box_renewal:
+                # *补充盒子数量
                 img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
-            if self.use_ensemble and self.sampling_timesteps > 1:
-                box_pred_per_image, scores_per_image, labels_per_image = self.inference(outputs_class[-1],
-                                                                                        outputs_coord[-1],
-                                                                                        img_sizes)
+
+        # *还需要将二维BEV的bbox转换为三维的bbox
+        return outputs_class, outputs_coord
+        
             
-    def inference(self, box_cls, box_pred, image_sizes):
-        assert len(box_cls) == len(image_sizes)
-        results = []
-        if self.use_focal or self.use_fed_loss:
-            scores = torch.sigmoid(box_cls)
-            labels = torch.arange(self.num_classes, device=self.device). \
-                unsqueeze(0).repeat(self.num_proposals, 1).flatten(0, 1)
+    # def inference(self, box_cls, box_pred, image_sizes):
+    #     assert len(box_cls) == len(image_sizes)
+    #     results = []
+    #     if self.use_focal or self.use_fed_loss:
+    #         scores = torch.sigmoid(box_cls)
+    #         labels = torch.arange(self.num_classes, device=self.device). \
+    #             unsqueeze(0).repeat(self.num_proposals, 1).flatten(0, 1)
 
-            for i, (scores_per_image, box_pred_per_image, image_size) in enumerate(zip(
-                    scores, box_pred, image_sizes
-            )):
-                # result = Instances(image_size)
-                scores_per_image, topk_indices = scores_per_image.flatten(0, 1).topk(self.num_proposals, sorted=False)
-                labels_per_image = labels[topk_indices]
-                box_pred_per_image = box_pred_per_image.view(-1, 1, 4).repeat(1, self.num_classes, 1).view(-1, 4)
-                box_pred_per_image = box_pred_per_image[topk_indices]
+    #         for i, (scores_per_image, box_pred_per_image, image_size) in enumerate(zip(
+    #                 scores, box_pred, image_sizes
+    #         )):
+    #             # result = Instances(image_size)
+    #             scores_per_image, topk_indices = scores_per_image.flatten(0, 1).topk(self.num_proposals, sorted=False)
+    #             labels_per_image = labels[topk_indices]
+    #             box_pred_per_image = box_pred_per_image.view(-1, 1, 4).repeat(1, self.num_classes, 1).view(-1, 4)
+    #             box_pred_per_image = box_pred_per_image[topk_indices]
 
-                if self.use_ensemble and self.sampling_timesteps > 1:
-                    return box_pred_per_image, scores_per_image, labels_per_image
+    #             if self.use_ensemble and self.sampling_timesteps > 1:
+    #                 return box_pred_per_image, scores_per_image, labels_per_image
 
-                if self.use_nms:
-                    _, keep = batched_nms(box_pred_per_image, scores_per_image, labels_per_image, dict(type='nms', iou_threshold=0.5))
-                    box_pred_per_image = box_pred_per_image[keep]
-                    scores_per_image = scores_per_image[keep]
-                    labels_per_image = labels_per_image[keep]
+    #             if self.use_nms:
+    #                 _, keep = batched_nms(box_pred_per_image, scores_per_image, labels_per_image, dict(type='nms', iou_threshold=0.5))
+    #                 box_pred_per_image = box_pred_per_image[keep]
+    #                 scores_per_image = scores_per_image[keep]
+    #                 labels_per_image = labels_per_image[keep]
 
 
     @torch.no_grad()

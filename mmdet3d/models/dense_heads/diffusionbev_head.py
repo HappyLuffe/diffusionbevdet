@@ -107,11 +107,12 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
 
         det_bboxes, det_labels = self.simple_test_bboxes(x, proposal_list, t, self.test_cfg, rescale=rescale)
 
-        bbox_results = [
-            rbbox2result(det_bboxes[i], det_labels[i],
-                         self.bbox_head.num_classes)
-            for i in range(len(det_bboxes))
-        ]
+        # bbox_results = [
+        #     rbbox2result(det_bboxes[i], det_labels[i],
+        #                  self.bbox_head.num_classes)
+        #     for i in range(len(det_bboxes))
+        # ]
+        return det_labels, det_bboxes
 
     def simple_test_bboxes(self, 
                            x, 
