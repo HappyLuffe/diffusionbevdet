@@ -14,7 +14,7 @@ from mmrotate.core import rbbox2result
 @HEADS.register_module()
 class DiffusionBEVHead(OrientedStandardRoIHead):
 
-    def _bbox_forward(self, x, rois):
+    def _bbox_forward(self, x, rois, t):
         """Box head forward function used in both training and testing.
 
         Args:
@@ -28,13 +28,13 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
             x[:self.bbox_roi_extractor.num_inputs], rois)
         if self.with_shared_head:
             bbox_feats = self.shared_head(bbox_feats)
-        cls_score, bbox_pred = self.bbox_head(bbox_feats)
+        cls_score, bbox_pred = self.bbox_head(bbox_feats, t)
 
         bbox_results = dict(
             cls_score=cls_score, bbox_pred=bbox_pred, bbox_feats=bbox_feats)
         return bbox_results
 
-    def _bbox_forward_train(self, x, sampling_results, gt_bboxes, gt_labels):
+    def _bbox_forward_train(self, x, sampling_results, gt_bboxes, gt_labels, t):
         """Run forward function and calculate loss for box head in training.
 
         Args:
@@ -48,7 +48,7 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
             dict[str, Tensor]: a dictionary of bbox_results.
         """
         rois = rbbox2roi([res.bboxes for res in sampling_results])
-        bbox_results = self._bbox_forward(x, rois)
+        bbox_results = self._bbox_forward(x, rois, t)
 
         bbox_targets = self.bbox_head.get_targets(sampling_results, gt_bboxes,
                                                   gt_labels, self.train_cfg)
@@ -97,7 +97,7 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
         # bbox head forward and loss
         if self.with_bbox:
             bbox_results = self._bbox_forward_train(x, sampling_results,
-                                                    gt_bboxes, gt_labels)
+                                                    gt_bboxes, gt_labels, t)
             losses.update(bbox_results['loss_bbox'])
 
         return losses
@@ -105,14 +105,18 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
     def simple_test(self, x, proposal_list, t, rescale=False):
         assert self.with_bbox, 'Bbox head must be implemented.'
 
-        det_bboxes, det_labels = self.simple_test_bboxes(x, proposal_list, t, self.test_cfg, rescale=rescale)
+        det_bboxes, det_scores, det_labels = self.simple_test_bboxes(x, proposal_list, t, self.test_cfg, rescale=rescale)
 
         # bbox_results = [
         #     rbbox2result(det_bboxes[i], det_labels[i],
         #                  self.bbox_head.num_classes)
         #     for i in range(len(det_bboxes))
         # ]
-        return det_labels, det_bboxes
+
+        # *三个变量都为List类型，长度为batch_size
+        # *List中的元素大小：
+        # *label=[num_boxes, 5], score=[num_boxes, ], bbox=[num_boxes, ]
+        return det_labels, det_scores, det_bboxes
 
     def simple_test_bboxes(self, 
                            x, 
@@ -141,24 +145,29 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
             bbox_pred = (None, ) * len(proposals)
 
         det_bboxes = []
+        det_scores = []
         det_labels = []
 
         batch_size = len(proposals)
         w, h = 1600, 1408
         img_shapes = tuple((w, h) for i in range(batch_size))
-        scale_factors = tuple([1., 1., 1., 1.] for i in range(batch_size))
+        # scale_factors = tuple([1., 1., 1., 1.] for i in range(batch_size))
 
         for i in range(len(proposals)):
-            det_bbox, det_label = self.bbox_head.get_bboxes(
+            det_bbox, det_score, det_label = self.bbox_head.get_bboxes(
                 rois[i],
                 cls_score[i],
                 bbox_pred[i],
                 img_shapes,
-                scale_factors,
                 rescale=rescale,
                 cfg=test_cfg)
             det_bboxes.append(det_bbox)
+            det_scores.append(det_score)
             det_labels.append(det_label)
-        return det_bboxes, det_labels
+        
+        det_bboxes = torch.stack(det_bboxes)
+        det_scores = torch.stack(det_scores)
+        det_labels = torch.stack(det_labels)
+        return det_bboxes, det_scores, det_labels
 
     

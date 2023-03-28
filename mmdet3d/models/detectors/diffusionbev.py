@@ -147,7 +147,9 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         x_boxes = torch.clamp(x, min=-1 * self.scale, max=self.scale)
         x_boxes = ((x_boxes / self.scale) + 1) / 2
         x_boxes = x_boxes * images_whwh[:, None, :]        
-        outputs_class, outputs_coord = self.pts_bbox_head.simple_test(backbone_feats, x_boxes, t)
+
+         # *outputs_class=[bs, num_boxes, 5], outputs_score=[bs, num_boxes, ], outputs_bbox=[bs, num_boxes, ]
+        outputs_class, outputs_score, outputs_coord = self.pts_bbox_head.simple_test(backbone_feats, x_boxes, t)
 
         x_start = outputs_coord
         x_start = x_start / images_whwh[:, None, :]
@@ -155,7 +157,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         x_start = torch.clamp(x_start, min=-1 * self.scale, max=self.scale)
         pred_noise = self.predict_noise_from_start(x, t, x_start)
 
-        return ModelPrediction(pred_noise, x_start), outputs_class, outputs_coord
+        return ModelPrediction(pred_noise, x_start), outputs_class, outputs_score, outputs_coord
 
         
 
@@ -182,7 +184,8 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         for time, time_next in time_pairs:
             time_cond = torch.full((batch,), time, device=self.device, dtype=torch.long)
             self_cond = x_start if self.self_condition else None
-            preds, outputs_class, outputs_coord = self.model_predictions(backbone_feats, images_whwh, img, time_cond, self_cond, clip_denoised)
+
+            preds, outputs_class, outputs_scores, outputs_coord = self.model_predictions(backbone_feats, images_whwh, img, time_cond, self_cond, clip_denoised)
             pred_noise, x_start = preds.pred_noise, preds.pred_x_start
 
             if self.box_renewal:
@@ -212,13 +215,18 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
                   c * pred_noise + \
                   sigma * noise
             
-            img_sizes = torch.tensor([w, h]).repeat(batch,1)
+            # img_sizes = torch.tensor([w, h]).repeat(batch,1)
             if self.box_renewal:
                 # *补充盒子数量
                 img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
 
-        # *还需要将二维BEV的bbox转换为三维的bbox
-        return outputs_class, outputs_coord
+        # todo 还需要将二维BEV的bbox转换为三维的bbox
+        # todo 需要对outputs_coord进行处理，加上高度数据
+        bbox_results = [
+            bbox3d2result(outputs_coord[i], outputs_scores[i], outputs_class[i])
+            for i in range(batch)
+        ]
+        return bbox_results
         
             
     # def inference(self, box_cls, box_pred, image_sizes):
@@ -373,6 +381,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             gt_labels[i] = gt_label
             gt_bev_boxes[i] = gt_bev_box
 
+        # todo 航向角的坐标系还需要处理
         gt_bev_boxes = lidabev2img(gt_bev_boxes)
 
         losses = dict()
