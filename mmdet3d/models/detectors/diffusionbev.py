@@ -241,8 +241,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         # *将坐标系进行转换，角度进行转换
         outputs_coord = img2lidarbev(outputs_coord)
 
-        # todo 还需要将二维BEV的bbox转换为三维的bbox
-        # todo 需要对outputs_coord进行处理，加上高度数据
+        # todo 还需要将二维BEV的bbox转换为三维的bbox,outputs_coord进行处理，加上高度数据
 
         bbox_results = [
             bbox3d2result(outputs_coord[i], outputs_scores[i], outputs_class[i])

@@ -45,19 +45,23 @@ class DiffusionBEVBBoxHead(RotatedShared2FCBBoxHead):
 
         for conv in self.cls_convs:
             x_cls = conv(x_cls)
+
         if x_cls.dim() > 2:
             if self.with_avg_pool:
                 x_cls = self.avg_pool(x_cls)
             x_cls = x_cls.flatten(1)
+
         for fc in self.cls_fcs:
             x_cls = self.relu(fc(x_cls))
 
         for conv in self.reg_convs:
             x_reg = conv(x_reg)
+
         if x_reg.dim() > 2:
             if self.with_avg_pool:
                 x_reg = self.avg_pool(x_reg)
             x_reg = x_reg.flatten(1)
+            
         for fc in self.reg_fcs:
             x_reg = self.relu(fc(x_reg))
 
