@@ -28,6 +28,8 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
             x[:self.bbox_roi_extractor.num_inputs], rois)
         if self.with_shared_head:
             bbox_feats = self.shared_head(bbox_feats)
+        # todo  时间还需要处理
+        t = torch.stack(t)
         cls_score, bbox_pred = self.bbox_head(bbox_feats, t)
 
         bbox_results = dict(
@@ -64,9 +66,9 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
                       proposal_list,
                       gt_bboxes,
                       gt_labels,
+                      t,
                       gt_bboxes_ignore=None,
-                      gt_masks=None,
-                      t=None):
+                      gt_masks=None):
         
         if self.with_bbox:
             num_pts = len(proposal_list)

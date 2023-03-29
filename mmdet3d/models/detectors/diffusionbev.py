@@ -330,7 +330,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         x = self.pts_middle_encoder(voxel_features, coors, batch_size)
         return x
 
-    def forward_single(self, gt_bboxes_3d, gt_labels_3d):
+    def noise_boxes_gen(self, gt_bboxes_3d, gt_labels_3d):
         h, w = 1408, 1600
         point_cloud_range=torch.tensor([0, -40, -3, 70.4, 40, 1]) # x0, y0, z0, x1, y1, z1
         voxel_size = torch.tensor([0.05, 0.05, 0.1])
@@ -404,7 +404,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         fuse_feats = pts_feats
         fuse_feats = [fuse_feats]
         
-        res = multi_apply(self.forward_single, gt_bboxes_3d, gt_labels_3d)
+        res = multi_apply(self.noise_boxes_gen, gt_bboxes_3d, gt_labels_3d)
         # *d_boxes, d_noise, d_t为list，大小为batch size
         # *[XYWHR]
         d_boxes = [i.cuda() for i in res[0]] # proposal
@@ -413,6 +413,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         gt_bev_boxes = [i.cuda() for i in res[3]]
         gt_labels = [i.cuda() for i in res[4]]
 
+        # *真值数据清洗
         batch_size = len(gt_labels)
         for i in range(batch_size):
             gt_label = gt_labels[i]

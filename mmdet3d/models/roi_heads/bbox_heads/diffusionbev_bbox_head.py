@@ -2,17 +2,30 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from mmcv.cnn import ConvModule
-from mmcv.runner import force_fp32
-from mmdet.models.losses import accuracy
-from mmdet.models.utils import build_linear_layer
 
-from mmrotate.core import build_bbox_coder, multiclass_nms_rotated
+from mmrotate.core import multiclass_nms_rotated
 from mmrotate.models.builder import ROTATED_HEADS
-from mmrotate.models.roi_heads.bbox_heads import RotatedShared2FCBBoxHead
+from mmrotate.models.roi_heads.bbox_heads import RotatedConvFCBBoxHead
+import math
+# from mmdet3d.models.builder import HEADS
+
+class SinusoidalPositionEmbeddings(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, time):
+        device = time.device
+        half_dim = self.dim // 2
+        embeddings = math.log(10000) / (half_dim - 1)
+        embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
+        embeddings = time[:, None] * embeddings[None, :]
+        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+        return embeddings
+
 
 @ROTATED_HEADS.register_module()
-class DiffusionBEVBBoxHead(RotatedShared2FCBBoxHead):
+class DiffusionBEVBBoxHead(RotatedConvFCBBoxHead):
     def __init__(self, fc_out_channels=1024, *args, **kwargs):
         super(DiffusionBEVBBoxHead, self).__init__(
             num_shared_convs=0,
@@ -24,9 +37,20 @@ class DiffusionBEVBBoxHead(RotatedShared2FCBBoxHead):
             fc_out_channels=fc_out_channels,
             *args,
             **kwargs)
+        d_model = 256
+        time_dim = d_model * 4
+        self.time_mlp = nn.Sequential(
+            SinusoidalPositionEmbeddings(d_model),
+            nn.Linear(d_model, time_dim),
+            nn.GELU(),
+            nn.Linear(time_dim, time_dim),
+        )
+        self.block_time_mlp = nn.Sequential(nn.SiLU(), nn.Linear(d_model * 4, d_model * 2))
+        
         
     def forward(self, x, t):
         """Forward function."""
+        time_emb = self.time_mlp(t)
         if self.num_shared_convs > 0:
             for conv in self.shared_convs:
                 x = conv(x)
@@ -40,6 +64,14 @@ class DiffusionBEVBBoxHead(RotatedShared2FCBBoxHead):
             for fc in self.shared_fcs:
                 x = self.relu(fc(x))
         # separate branches
+
+        scale_shift = self.block_time_mlp(time_emb)
+        # todo 此处不严谨，后续需要修改
+        nr_boxes = 500
+        scale_shift = torch.repeat_interleave(scale_shift, nr_boxes, dim=0)
+        scale, shift = scale_shift.chunk(2, dim=1)
+        x = x * (scale + 1) + shift
+
         x_cls = x
         x_reg = x
 
@@ -61,7 +93,7 @@ class DiffusionBEVBBoxHead(RotatedShared2FCBBoxHead):
             if self.with_avg_pool:
                 x_reg = self.avg_pool(x_reg)
             x_reg = x_reg.flatten(1)
-            
+
         for fc in self.reg_fcs:
             x_reg = self.relu(fc(x_reg))
 
