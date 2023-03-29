@@ -21,6 +21,29 @@ from mmcv.ops.nms import batched_nms
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
+avg_height = [1.73, 1.73, 1.56, -1]
+
+def addheight(bboxes, labels):
+    batch_size = bboxes.shape[0]
+    for i in range(batch_size):
+        bbox = bboxes[i].cpu().numpy()
+        lenth = np.size(bbox, 0)
+
+        temp = np.ones(lenth)
+        bbox = np.insert(bbox, 2, temp, axis=1)
+        bbox = np.insert(bbox, 5, temp, axis=1)
+
+        bbox[:, :6] = bbox[:, :6] * 0.05
+
+        for j in range(lenth):
+            label = labels[i, j].item()
+            height = avg_height[label]
+            bbox[j][2] = height / 2
+            bbox[j][5] = height
+            
+        bboxes[i] = torch.from_numpy(bbox).cuda()
+    return bboxes
+
 def lidarbev2img(bboxes):
     bev_bboxes = bboxes
     batch_size = len(bev_bboxes)
@@ -41,10 +64,10 @@ def lidarbev2img(bboxes):
 
 def img2lidarbev(bev_bboxes):
     bboxes = bev_bboxes
-    batch_size = len(bev_bboxes)
+    batch_size = bev_bboxes.shape[0]
     for i in range(batch_size):
         bbox = bboxes[i].cpu().numpy()
-        lenth = np.size(bboxes, 0)
+        lenth = np.size(bbox, 0)
         for j in range(lenth):
             w, h = bbox[j][2], bbox[j][3]
             x = 1408 - bbox[j][1]
@@ -241,7 +264,8 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         # *将坐标系进行转换，角度进行转换
         outputs_coord = img2lidarbev(outputs_coord)
 
-        # todo 还需要将二维BEV的bbox转换为三维的bbox,outputs_coord进行处理，加上高度数据
+        # *将二维BEV的bbox转换为三维的bbox, 对outputs_coord进行处理，加上高度数据
+        outputs_coord = addheight(outputs_coord, outputs_class)
 
         bbox_results = [
             bbox3d2result(outputs_coord[i], outputs_scores[i], outputs_class[i])
@@ -402,7 +426,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             gt_labels[i] = gt_label
             gt_bev_boxes[i] = gt_bev_box
 
-        # todo 航向角的坐标系还需要处理
+        # *航向角的坐标系还需要处理
         gt_bev_boxes = lidarbev2img(gt_bev_boxes)
 
         losses = dict()
