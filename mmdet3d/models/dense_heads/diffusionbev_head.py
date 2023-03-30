@@ -29,7 +29,7 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
         if self.with_shared_head:
             bbox_feats = self.shared_head(bbox_feats)
         # todo  时间还需要处理
-        t = torch.stack(t)
+        t = torch.stack(t).flatten()
         cls_score, bbox_pred = self.bbox_head(bbox_feats, t)
 
         bbox_results = dict(

@@ -67,7 +67,7 @@ class DiffusionBEVBBoxHead(RotatedConvFCBBoxHead):
 
         scale_shift = self.block_time_mlp(time_emb)
         # todo 此处不严谨，后续需要修改
-        nr_boxes = 500
+        nr_boxes = 200
         scale_shift = torch.repeat_interleave(scale_shift, nr_boxes, dim=0)
         scale, shift = scale_shift.chunk(2, dim=1)
         x = x * (scale + 1) + shift

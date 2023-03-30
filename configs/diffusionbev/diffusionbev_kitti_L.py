@@ -93,8 +93,8 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=2,
-    workers_per_gpu=2,
+    samples_per_gpu=1,
+    workers_per_gpu=1,
     train=dict(
         type='RepeatDataset',
         times=2,
@@ -159,7 +159,7 @@ model = dict(
         bbox_head=dict(
             type='DiffusionBEVBBoxHead',
             in_channels=256,
-            fc_out_channels=1024,
+            fc_out_channels=256,
             roi_feat_size=7,
             num_classes=3,
             bbox_coder=dict(

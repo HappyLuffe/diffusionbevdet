@@ -414,6 +414,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         gt_labels = [i.cuda() for i in res[4]]
 
         # *真值数据清洗
+        # todo 存在bug
         batch_size = len(gt_labels)
         for i in range(batch_size):
             gt_label = gt_labels[i]
@@ -423,7 +424,8 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
                 if label.item() == -1:
                     gt_label = del_tensor_ele(gt_label, index)
                     gt_bev_box = del_tensor_ele(gt_bev_box, index)
-                index += 1
+                else:
+                    index += 1
             gt_labels[i] = gt_label
             gt_bev_boxes[i] = gt_bev_box
 
