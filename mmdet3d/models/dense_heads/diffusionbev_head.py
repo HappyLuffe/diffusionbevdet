@@ -29,7 +29,6 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
         if self.with_shared_head:
             bbox_feats = self.shared_head(bbox_feats)
         # todo  时间还需要处理
-        t = torch.stack(t).flatten()
         cls_score, bbox_pred = self.bbox_head(bbox_feats, t)
 
         bbox_results = dict(
@@ -127,7 +126,7 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
                            test_cfg, 
                            rescale=False):
         rois = rbbox2roi(proposals)
-        bbox_results = self._bbox_forward(x, rois)
+        bbox_results = self._bbox_forward(x, rois, t)
 
         cls_score = bbox_results['cls_score']
         bbox_pred = bbox_results['bbox_pred']
@@ -152,7 +151,7 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
 
         batch_size = len(proposals)
         w, h = 1600, 1408
-        img_shapes = tuple((w, h) for i in range(batch_size))
+        img_shapes = tuple([w, h])
         # scale_factors = tuple([1., 1., 1., 1.] for i in range(batch_size))
 
         for i in range(len(proposals)):

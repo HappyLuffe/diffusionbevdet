@@ -15,7 +15,7 @@ lr_config = dict(
     warmup_iters=500,
     warmup_ratio=1.0 / 3,
     step=[8, 11])
-runner = dict(type='EpochBasedRunner', max_epochs=12)
+runner = dict(type='EpochBasedRunner', max_epochs=1)
 checkpoint_config = dict(interval=1)
 ######################################################################################
 
@@ -93,8 +93,8 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=1,
-    workers_per_gpu=1,
+    samples_per_gpu=16,
+    workers_per_gpu=2,
     train=dict(
         type='RepeatDataset',
         times=2,

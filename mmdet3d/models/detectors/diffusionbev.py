@@ -206,14 +206,14 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
     @torch.no_grad()
     def ddim_sample(self, backbone_feats, images_whwh, points, clip_denoised=True, do_postprocess=True):
         w, h = 1600, 1408
-        batch = points.shape[0]
-        images_whwh = torch.tensor([w, h, w, h, 2 * math.pi]).repeat(batch, 1)
+        batch = len(points)
+        images_whwh = torch.tensor([w, h, w, h, 2 * math.pi]).repeat(batch, 1).cuda()
 
         shape = (batch, self.num_proposals, 5)
         total_timesteps, sampling_timesteps, eta = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta
 
         # *[-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
-        times = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)
+        times = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1).cuda()
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:]))  # *[(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
 
@@ -349,7 +349,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             bbox[:4] = torch.round(bbox[:4]).long()
             gt_bev_bboxes[i] = bbox
 
-        image_size_xyxy = torch.as_tensor([h, w, h, w, 1.], dtype=torch.float)
+        image_size_xyxy = torch.as_tensor([h, w, h, w, 2 * math.pi], dtype=torch.float)
 
         gt_bev_bboxes = gt_bev_bboxes / image_size_xyxy
 
@@ -433,6 +433,8 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         gt_bev_boxes = lidarbev2img(gt_bev_boxes)
 
         losses = dict()
+
+        d_t = torch.stack(d_t).flatten()
 
         roi_losses = self.pts_bbox_head.forward_train(fuse_feats, d_boxes, gt_bev_boxes, gt_labels, d_t)
         losses.update(roi_losses)

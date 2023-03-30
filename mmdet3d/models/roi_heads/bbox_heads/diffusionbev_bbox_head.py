@@ -142,9 +142,12 @@ class DiffusionBEVBBoxHead(RotatedConvFCBBoxHead):
                 cls_score, dim=-1) if cls_score is not None else None
         # bbox_pred would be None in some detector when with_reg is False,
         # e.g. Grid R-CNN.
+        # !此处有报错
         if bbox_pred is not None:
+            # bboxes = self.bbox_coder.decode(rois[..., 1:], bbox_pred, max_shape=img_shape)
             bboxes = self.bbox_coder.decode(
-                rois[..., 1:], bbox_pred, max_shape=img_shape)
+                rois[..., 1:], bbox_pred)
+            
         else:
             bboxes = rois[:, 1:].clone()
             if img_shape is not None:
@@ -157,11 +160,16 @@ class DiffusionBEVBBoxHead(RotatedConvFCBBoxHead):
         #     bboxes[..., :4] = bboxes[..., :4] / scale_factor
         #     bboxes = bboxes.view(bboxes.size(0), -1)
 
+        
+
         if cfg is None:
             return bboxes, scores
         else:
+            bboxes = bboxes.cpu()
+            scores = scores.cpu()
+
             det_bboxes, det_labels = multiclass_nms_rotated(
                 bboxes, scores, cfg.score_thr, cfg.nms, cfg.max_per_img)            
-            det_scores = det_bboxes[:, 5:]
-            det_bboxes = det_bboxes[:, :5]            
+            det_scores = det_bboxes[:, 5:].cuda()
+            det_bboxes = det_bboxes[:, :5].cuda()            
             return det_bboxes, det_scores, det_labels
