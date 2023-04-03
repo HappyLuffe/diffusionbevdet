@@ -192,16 +192,16 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
                 extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
         )
 
-    def model_predictions(self, backbone_feats, images_whwh, x, t, x_self_cond=None, clip_x_start=False):
+    def model_predictions(self, backbone_feats, images_whwhr, x, t, x_self_cond=None, clip_x_start=False):
         x_boxes = torch.clamp(x, min=-1 * self.scale, max=self.scale)
         x_boxes = ((x_boxes / self.scale) + 1) / 2
-        x_boxes = x_boxes * images_whwh[:, None, :]        
+        x_boxes = x_boxes * images_whwhr[:, None, :]        
 
          # *outputs_score=[bs, num_boxes, num_class+1], outputs_coord=[bs, num_boxes, 5]
         outputs_score, outputs_coord = self.pts_bbox_head.simple_test(backbone_feats, x_boxes, t)
 
         x_start = outputs_coord
-        x_start = x_start / images_whwh[:, None, :]
+        x_start = x_start / images_whwhr[:, None, :]
         x_start = (x_start * 2 - 1.) * self.scale
         x_start = torch.clamp(x_start, min=-1 * self.scale, max=self.scale)
         pred_noise = self.predict_noise_from_start(x, t, x_start)
@@ -210,10 +210,10 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
 
 
     @torch.no_grad()
-    def ddim_sample(self, backbone_feats, images_whwh, points, clip_denoised=True, do_postprocess=True):
+    def ddim_sample(self, backbone_feats, images_whwhr, points, clip_denoised=True, do_postprocess=True):
         w, h = 1600, 1408
         batch_size = len(points)
-        images_whwh = torch.tensor([w, h, w, h, 2 * math.pi]).repeat(batch_size, 1).cuda()
+        images_whwhr = torch.tensor([w, h, w, h, 2 * math.pi]).repeat(batch_size, 1).cuda()
 
         shape = (batch_size, self.num_proposals, 5)
         total_timesteps, sampling_timesteps, eta = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta
@@ -233,7 +233,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             self_cond = x_start if self.self_condition else None
             
             # *outputs_score=[bs, num_boxes, num_class+1], outputs_coord=[bs, num_boxes, 5]
-            preds, outputs_scores, outputs_coords = self.model_predictions(backbone_feats, images_whwh, img, time_cond, self_cond, clip_denoised)
+            preds, outputs_scores, outputs_coords = self.model_predictions(backbone_feats, images_whwhr, img, time_cond, self_cond, clip_denoised)
             pred_noise, x_start = preds.pred_noise, preds.pred_x_start
 
 
@@ -450,20 +450,6 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         gt_bev_boxes = [i.cuda() for i in res[3]]
         gt_labels = [i.cuda() for i in res[4]]
 
-        # # *真值数据清洗
-        # batch_size = len(gt_labels)
-        # for i in range(batch_size):
-        #     gt_label = gt_labels[i]
-        #     gt_bev_box = gt_bev_boxes[i]
-        #     index = 0
-        #     for label in gt_label:
-        #         if label.item() == -1:
-        #             gt_label = del_tensor_ele(gt_label, index)
-        #             gt_bev_box = del_tensor_ele(gt_bev_box, index)
-        #         else:
-        #             index += 1
-        #     gt_labels[i] = gt_label
-        #     gt_bev_boxes[i] = gt_bev_box
 
         # *航向角的坐标系还需要处理
         gt_bev_boxes = lidarbev2img(gt_bev_boxes)
