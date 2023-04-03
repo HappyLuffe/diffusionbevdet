@@ -1,8 +1,9 @@
 _base_ = [
     '../_base_/models/hv_pointpillars_secfpn_kitti.py',
     '../_base_/datasets/kitti-3d-3class.py',
-    '../_base_/schedules/cyclic_40e.py', '../_base_/default_runtime.py'
+    '../_base_/default_runtime.py'
 ]
+
 
 point_cloud_range = [0, -39.68, -3, 69.12, 39.68, 1]
 # dataset settings
@@ -99,18 +100,17 @@ data = dict(
     val=dict(pipeline=test_pipeline, classes=class_names),
     test=dict(pipeline=test_pipeline, classes=class_names))
 
-# In practice PointPillars also uses a different schedule
+# evaluation
+evaluation = dict(interval=1, metric='mAP')
 # optimizer
-lr = 0.001
-optimizer = dict(lr=lr)
-# max_norm=35 is slightly better than 10 for PointPillars in the earlier
-# development of the codebase thus we keep the setting. But we does not
-# specifically tune this parameter.
+optimizer = dict(type='SGD', lr=0.0025, momentum=0.9, weight_decay=0.0001)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
-# PointPillars usually need longer schedule than second, we simply double
-# the training schedule. Do remind that since we use RepeatDataset and
-# repeat factor is 2, so we actually train 160 epochs.
-runner = dict(max_epochs=80)
-
-# Use evaluation interval=2 reduce the number of evaluation timese
-evaluation = dict(interval=2)
+# learning policy
+lr_config = dict(
+    policy='step',
+    warmup='linear',
+    warmup_iters=500,
+    warmup_ratio=1.0 / 3,
+    step=[8, 11])
+runner = dict(type='EpochBasedRunner', max_epochs=1)
+checkpoint_config = dict(interval=1)

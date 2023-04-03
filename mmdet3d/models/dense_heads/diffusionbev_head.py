@@ -29,7 +29,6 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
         if self.with_shared_head:
             bbox_feats = self.shared_head(bbox_feats)
         # todo  时间还需要处理
-        t = torch.stack(t).flatten()
         cls_score, bbox_pred = self.bbox_head(bbox_feats, t)
 
         bbox_results = dict(
@@ -107,7 +106,7 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
     def simple_test(self, x, proposal_list, t, rescale=False):
         assert self.with_bbox, 'Bbox head must be implemented.'
 
-        det_bboxes, det_scores, det_labels = self.simple_test_bboxes(x, proposal_list, t, self.test_cfg, rescale=rescale)
+        det_bboxes, det_scores = self.simple_test_bboxes(x, proposal_list, t, self.test_cfg, rescale=rescale)
 
         # bbox_results = [
         #     rbbox2result(det_bboxes[i], det_labels[i],
@@ -118,7 +117,7 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
         # *三个变量都为List类型，长度为batch_size
         # *List中的元素大小：
         # *label=[num_boxes, 5], score=[num_boxes, ], bbox=[num_boxes, ]
-        return det_labels, det_scores, det_bboxes
+        return det_scores, det_bboxes
 
     def simple_test_bboxes(self, 
                            x, 
@@ -127,7 +126,7 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
                            test_cfg, 
                            rescale=False):
         rois = rbbox2roi(proposals)
-        bbox_results = self._bbox_forward(x, rois)
+        bbox_results = self._bbox_forward(x, rois, t)
 
         cls_score = bbox_results['cls_score']
         bbox_pred = bbox_results['bbox_pred']
@@ -148,28 +147,27 @@ class DiffusionBEVHead(OrientedStandardRoIHead):
 
         det_bboxes = []
         det_scores = []
-        det_labels = []
 
         batch_size = len(proposals)
         w, h = 1600, 1408
-        img_shapes = tuple((w, h) for i in range(batch_size))
+        img_shapes = tuple([w, h])
         # scale_factors = tuple([1., 1., 1., 1.] for i in range(batch_size))
 
         for i in range(len(proposals)):
-            det_bbox, det_score, det_label = self.bbox_head.get_bboxes(
+            # *bboxes=[n, 5], scores=[n, num_class+1]
+            det_bbox, det_score = self.bbox_head.get_bboxes(
                 rois[i],
                 cls_score[i],
                 bbox_pred[i],
                 img_shapes,
                 rescale=rescale,
                 cfg=test_cfg)
+            
             det_bboxes.append(det_bbox)
             det_scores.append(det_score)
-            det_labels.append(det_label)
         
         det_bboxes = torch.stack(det_bboxes)
         det_scores = torch.stack(det_scores)
-        det_labels = torch.stack(det_labels)
-        return det_bboxes, det_scores, det_labels
+        return det_bboxes, det_scores
 
     

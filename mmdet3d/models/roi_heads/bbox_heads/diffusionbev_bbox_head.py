@@ -144,7 +144,7 @@ class DiffusionBEVBBoxHead(RotatedConvFCBBoxHead):
         # e.g. Grid R-CNN.
         if bbox_pred is not None:
             bboxes = self.bbox_coder.decode(
-                rois[..., 1:], bbox_pred, max_shape=img_shape)
+                rois[..., 1:], bbox_pred)
         else:
             bboxes = rois[:, 1:].clone()
             if img_shape is not None:
@@ -156,12 +156,15 @@ class DiffusionBEVBBoxHead(RotatedConvFCBBoxHead):
         #     bboxes = bboxes.view(bboxes.size(0), -1, 5)
         #     bboxes[..., :4] = bboxes[..., :4] / scale_factor
         #     bboxes = bboxes.view(bboxes.size(0), -1)
+        
+        # *bboxes=[n, 5], scores=[n, num_class+1]
+        return bboxes, scores
 
-        if cfg is None:
-            return bboxes, scores
-        else:
-            det_bboxes, det_labels = multiclass_nms_rotated(
-                bboxes, scores, cfg.score_thr, cfg.nms, cfg.max_per_img)            
-            det_scores = det_bboxes[:, 5:]
-            det_bboxes = det_bboxes[:, :5]            
-            return det_bboxes, det_scores, det_labels
+        # if cfg is None:
+        #     return bboxes, scores
+        # else:
+        #     det_bboxes, det_labels = multiclass_nms_rotated(
+        #         bboxes, scores, cfg.score_thr, cfg.nms, cfg.max_per_img)            
+        #     det_scores = det_bboxes[:, 5:]
+        #     det_bboxes = det_bboxes[:, :5]            
+        #     return det_bboxes, det_scores, det_labels
