@@ -37,7 +37,7 @@ class DiffusionBEVBBoxHead(RotatedConvFCBBoxHead):
             fc_out_channels=fc_out_channels,
             *args,
             **kwargs)
-        d_model = 256
+        d_model = 1024
         time_dim = d_model * 4
         self.time_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(d_model),

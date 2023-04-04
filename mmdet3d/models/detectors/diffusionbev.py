@@ -24,7 +24,7 @@ from mmdet3d.core.bbox import LiDARInstance3DBoxes
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
-avg_height = [1.73, 1.73, 1.56, -1]
+avg_height = [1.73, 1.73, 1.56, 0]
 
 # todo有bug需要修改
 def addheight(bboxes, labels):
@@ -44,7 +44,7 @@ def addheight(bboxes, labels):
         for j in range(lenth):
             label = labels[i, j].item()
             height = avg_height[label]
-            bbox[j][2] = height / 2
+            bbox[j][2] = 0 + height / 2
             bbox[j][5] = height
         bbox = LiDARInstance3DBoxes(bbox)    
         bboxes_t.append(bbox)
@@ -60,7 +60,7 @@ def lidarbev2img(bboxes):
         lenth = np.size(bev_bbox, 0)
         for j in range(lenth):
             w, h = bev_bbox[j][2], bev_bbox[j][3]
-            x = 800 - bev_bbox[j][1]
+            x = 1600 - bev_bbox[j][1]
             y = 1408 - bev_bbox[j][0]
             bev_bbox[j][:4] = np.asarray([x, y, h, w])
             r = bev_bbox[j][4]
@@ -357,7 +357,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         return x
 
     def noise_boxes_gen(self, gt_bboxes_3d, gt_labels_3d):
-        h, w = 1408, 1600
+        w, h = 1408, 1600
         point_cloud_range=torch.tensor([0, -40, -3, 70.4, 40, 1]) # x0, y0, z0, x1, y1, z1
         voxel_size = torch.tensor([0.05, 0.05, 0.1])
 
@@ -386,12 +386,11 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             bbox[:4] = torch.round(bbox[:4]).long()
             gt_bev_bboxes[i] = bbox
 
-        image_size_xyxy = torch.as_tensor([h, w, h, w, 1.], dtype=torch.float)
+        image_size_xyxyr = torch.as_tensor([w, h, w, h, 1.], dtype=torch.float)
 
-        gt_bev_bboxes = gt_bev_bboxes / image_size_xyxy
+        gt_bev_bboxes = gt_bev_bboxes / image_size_xyxyr
 
 
-        target = {}
         t = torch.randint(0, self.num_timesteps, (1,), device=self.device).long()
         noise = torch.randn(self.num_proposals, 5, device=self.device)
 
@@ -417,8 +416,8 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         x = ((x / self.scale) + 1) / 2.
 
 
-        x = x * image_size_xyxy.cuda()
-        gt_bev_bboxes = gt_bev_bboxes * image_size_xyxy
+        x = x * image_size_xyxyr.cuda()
+        gt_bev_bboxes = gt_bev_bboxes * image_size_xyxyr
 
         return x, noise, t, gt_bev_bboxes, gt_labels
 
