@@ -17,14 +17,45 @@ from .mvx_two_stage import MVXTwoStageDetector
 import math
 import numpy as np
 from collections import namedtuple
-from mmcv.ops.nms import batched_nms
 from mmrotate.core import multiclass_nms_rotated
 from mmdet3d.core.bbox import LiDARInstance3DBoxes
-
+import matplotlib.pyplot as plt
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
 avg_height = [1.73, 1.73, 1.56, 0]
+
+def drawimg(xy):
+    xy = xy.cpu().numpy()
+    x = xy[:, 0].flatten()
+    y = xy[:, 1].flatten()
+    plt.figure(num='haha')
+    plt.scatter(x, y)
+    plt.xlim((0, 1600))
+    plt.ylim((0, 1408))
+    ax = plt.gca()
+    ax.xaxis.set_ticks_position('top')  #将x轴的位置设置在顶部
+    # ax.invert_xaxis()  #x轴反向
+    ax.yaxis.set_ticks_position('left')  #将y轴的位置设置在左边
+    ax.invert_yaxis()  #y轴反向
+
+    plt.savefig('out/img.png')
+
+def drawlidar(xy):
+    xy = xy.cpu().numpy()
+    x = xy[:, 0].flatten()
+    y = xy[:, 1].flatten()
+    plt.figure(num='hoho')
+    plt.scatter(y, x)
+    plt.xlim((-800, 800))
+    plt.ylim((0, 1408))
+    ax = plt.gca()
+    # ax.xaxis.set_ticks_position('top')  #将x轴的位置设置在顶部
+    ax.invert_xaxis()  #x轴反向
+    # ax.yaxis.set_ticks_position('left')  #将y轴的位置设置在左边
+    # ax.invert_yaxis()  #y轴反向
+
+    plt.savefig('out/lidar.png')
 
 # todo有bug需要修改
 def addheight(bboxes, labels):
@@ -44,7 +75,7 @@ def addheight(bboxes, labels):
         for j in range(lenth):
             label = labels[i, j].item()
             height = avg_height[label]
-            bbox[j][2] = 0 + height / 2
+            bbox[j][2] = height / 2 - 2.5
             bbox[j][5] = height
         bbox = LiDARInstance3DBoxes(bbox)    
         bboxes_t.append(bbox)
@@ -198,7 +229,15 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         x_boxes = x_boxes * images_whwhr[:, None, :]        
 
          # *outputs_score=[bs, num_boxes, num_class+1], outputs_coord=[bs, num_boxes, 5]
-        outputs_score, outputs_coord = self.pts_bbox_head.simple_test(backbone_feats, x_boxes, t)
+        
+        # drawimg(x_boxes[0])
+
+        outputs_coord = x_boxes
+        
+        for i in range(6):
+            outputs_score, outputs_coord = self.pts_bbox_head.simple_test(backbone_feats, outputs_coord, t)
+            
+        # drawimg(outputs_coord[0])
 
         x_start = outputs_coord
         x_start = x_start / images_whwhr[:, None, :]
@@ -211,9 +250,11 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
 
     @torch.no_grad()
     def ddim_sample(self, backbone_feats, images_whwhr, points, clip_denoised=True, do_postprocess=True):
+        
+
         w, h = 1600, 1408
         batch_size = len(points)
-        images_whwhr = torch.tensor([w, h, w, h, 2 * math.pi]).repeat(batch_size, 1).cuda()
+        images_whwhr = torch.tensor([w, h, 100, 100, 2 * math.pi]).repeat(batch_size, 1).cuda()
 
         shape = (batch_size, self.num_proposals, 5)
         total_timesteps, sampling_timesteps, eta = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta
@@ -276,9 +317,11 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             scores, bboxes = outputs_scores[i].cpu(), outputs_coords[i].cpu()
             det_bboxes, det_labels = multiclass_nms_rotated(
                 bboxes, scores, self.test_cfg['pts']['score_thr'], self.test_cfg['pts']['nms'], self.test_cfg['pts']['max_per_img'])
-            det_scores = det_bboxes[:, 5:].cuda()
+            det_scores = det_bboxes[:, 5:].cuda().squeeze(1)
             det_bboxes = det_bboxes[:, :5].cuda()
             
+            # drawimg(det_bboxes)
+
             bbox_t.append(det_bboxes)
             score_t.append(det_scores)
             label_t.append(det_labels)
@@ -290,6 +333,10 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         # *将坐标系进行转换，角度进行转换
         outputs_coords = img2lidarbev(outputs_coords)
 
+        # drawlidar(outputs_coords[0])
+
+        
+
         # *将二维BEV的bbox转换为三维的bbox, 对outputs_coord进行处理，加上高度数据
         outputs_coords = addheight(outputs_coords, outputs_labels)
 
@@ -299,33 +346,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         ]
         return bbox_results
         
-    '''        
-    # def inference(self, box_cls, box_pred, image_sizes):
-    #     assert len(box_cls) == len(image_sizes)
-    #     results = []
-    #     if self.use_focal or self.use_fed_loss:
-    #         scores = torch.sigmoid(box_cls)
-    #         labels = torch.arange(self.num_classes, device=self.device). \
-    #             unsqueeze(0).repeat(self.num_proposals, 1).flatten(0, 1)
 
-    #         for i, (scores_per_image, box_pred_per_image, image_size) in enumerate(zip(
-    #                 scores, box_pred, image_sizes
-    #         )):
-    #             # result = Instances(image_size)
-    #             scores_per_image, topk_indices = scores_per_image.flatten(0, 1).topk(self.num_proposals, sorted=False)
-    #             labels_per_image = labels[topk_indices]
-    #             box_pred_per_image = box_pred_per_image.view(-1, 1, 4).repeat(1, self.num_classes, 1).view(-1, 4)
-    #             box_pred_per_image = box_pred_per_image[topk_indices]
-
-    #             if self.use_ensemble and self.sampling_timesteps > 1:
-    #                 return box_pred_per_image, scores_per_image, labels_per_image
-
-    #             if self.use_nms:
-    #                 _, keep = batched_nms(box_pred_per_image, scores_per_image, labels_per_image, dict(type='nms', iou_threshold=0.5))
-    #                 box_pred_per_image = box_pred_per_image[keep]
-    #                 scores_per_image = scores_per_image[keep]
-    #                 labels_per_image = labels_per_image[keep]
-    '''
 
     @torch.no_grad()
     @force_fp32()
@@ -352,8 +373,11 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
     def extract_pts_feat(self, pts, img_feats, img_metas):
         voxels, num_points, coors = self.voxelize(pts)
         voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
-        batch_size = coors[-1, 0] + 1
+        batch_size = coors[-1, 0].item() + 1        
         x = self.pts_middle_encoder(voxel_features, coors, batch_size)
+        x = self.pts_backbone(x)
+        if self.with_pts_neck:
+            x = self.pts_neck(x)
         return x
 
     def noise_boxes_gen(self, gt_bboxes_3d, gt_labels_3d):
@@ -386,7 +410,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             bbox[:4] = torch.round(bbox[:4]).long()
             gt_bev_bboxes[i] = bbox
 
-        image_size_xyxyr = torch.as_tensor([w, h, w, h, 1.], dtype=torch.float)
+        image_size_xyxyr = torch.as_tensor([w, h, 100, 100, 1.], dtype=torch.float)
 
         gt_bev_bboxes = gt_bev_bboxes / image_size_xyxyr
 
@@ -436,8 +460,8 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             points, img=img, img_metas=img_metas)
         
         # *暂时只使用单模态的数据
-        # *pts_feats.shape = [2, 256, 200, 176]
-        fuse_feats = pts_feats
+        # *pts_feats.shape = [bs, 256, 200, 176]
+        fuse_feats = pts_feats[0]
         fuse_feats = [fuse_feats]
         
         res = multi_apply(self.noise_boxes_gen, gt_bboxes_3d, gt_labels_3d)
@@ -456,6 +480,10 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         losses = dict()
 
         d_t = torch.stack(d_t).flatten()
+        
+        # drawimg(d_boxes[0])
+        # drawimg(gt_bev_boxes[0])
+
         roi_losses = self.pts_bbox_head.forward_train(fuse_feats, d_boxes, gt_bev_boxes, gt_labels, d_t)
         losses.update(roi_losses)
         return losses
@@ -464,7 +492,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         img_feats, pts_feats = self.extract_feat(
             points, img=img, img_metas=img_metas)
         
-        fuse_feats = pts_feats
+        fuse_feats = pts_feats[0]
         fuse_feats = [fuse_feats]
 
         results = self.ddim_sample(fuse_feats, None, points)

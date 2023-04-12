@@ -117,7 +117,9 @@ data = dict(
         pipeline=test_pipeline,
         modality=input_modality,
         classes=class_names,
-        test_mode=True),
+        test_mode=True,
+        box_type_3d='LiDAR',
+        file_client_args=file_client_args),
     test=dict(
         type=dataset_type,
         data_root=data_root,
@@ -127,7 +129,9 @@ data = dict(
         pipeline=test_pipeline,
         modality=input_modality,
         classes=class_names,
-        test_mode=True))
+        test_mode=True,
+        box_type_3d='LiDAR',
+        file_client_args=file_client_args))
 
 
 
@@ -144,7 +148,17 @@ model = dict(
         in_channels=4,
         sparse_shape=[41, 1600, 1408],
         order=('conv', 'norm', 'act')),
-    pts_backbone=dict(),
+    pts_backbone=dict(
+        type='SECOND',
+        in_channels=256,
+        layer_nums=[5, 5],
+        layer_strides=[1, 2],
+        out_channels=[128, 256]),
+    pts_neck=dict(
+        type='SECONDFPN',
+        in_channels=[128, 256],
+        upsample_strides=[1, 2],
+        out_channels=[256, 256]),
     pts_bbox_head=dict(
         type='DiffusionBEVHead',
         bbox_roi_extractor=dict(
@@ -154,11 +168,11 @@ model = dict(
                 out_size=7,
                 sample_num=2,
                 clockwise=True),
-            out_channels=256,
+            out_channels=512,
             featmap_strides=[8]),
         bbox_head=dict(
             type='DiffusionBEVBBoxHead',
-            in_channels=256,
+            in_channels=512,
             fc_out_channels=1024,
             roi_feat_size=7,
             num_classes=3,
@@ -187,7 +201,7 @@ model = dict(
                 ignore_iof_thr=-1),
             sampler=dict(
                 type='RRandomSampler',
-                num=200,
+                num=50,
                 pos_fraction=0.25,
                 neg_pos_ub=-1,
                 add_gt_as_proposals=True),
@@ -196,11 +210,10 @@ model = dict(
         )),
     test_cfg=dict(   
         pts=dict(
-            nms_pre=2000,
-            min_bbox_size=0,
-            score_thr=0.05,
+            # min_bbox_size=0.01,
+            score_thr=0.1,
             nms=dict(iou_thr=0.1),
-            max_per_img=2000
+            max_per_img=50
         ))
 )
 

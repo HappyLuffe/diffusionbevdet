@@ -47,7 +47,6 @@ class DiffusionBEVBBoxHead(RotatedConvFCBBoxHead):
         )
         self.block_time_mlp = nn.Sequential(nn.SiLU(), nn.Linear(d_model * 4, d_model * 2))
         
-        
     def forward(self, x, t):
         """Forward function."""
         time_emb = self.time_mlp(t)
@@ -70,7 +69,7 @@ class DiffusionBEVBBoxHead(RotatedConvFCBBoxHead):
         nr_boxes = 200
         scale_shift = torch.repeat_interleave(scale_shift, nr_boxes, dim=0)
         scale, shift = scale_shift.chunk(2, dim=1)
-        x = x * (scale + 1) + shift
+        # x = x * (scale + 1) + shift
 
         x_cls = x
         x_reg = x
