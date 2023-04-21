@@ -161,6 +161,33 @@ model = dict(
         out_channels=[256, 256]),
     pts_bbox_head=dict(
         type='DiffusionBEVHead',
+        num_proposals=200,
+        auxiliary=True,
+        in_channels=256,
+        hidden_channel=128,
+        num_classes=3,
+        num_decoder_layers=1,
+        num_heads=8,
+        learnable_query_pos=False,
+        nms_kernel_size=3,
+        ffn_channel=256,
+        dropout=0.1,
+        bn_momentum=0.1,
+        activation='relu',
+        common_heads=dict(center=(2, 2), height=(1, 2), dim=(3, 2), rot=(2, 2), vel=(2, 2)),
+        bbox_coder=dict(
+            type='TransFusionBBoxCoder',
+            pc_range=point_cloud_range[:2],
+            voxel_size=voxel_size[:2],
+            out_size_factor=out_size_factor,
+            post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
+            score_threshold=0.0,
+            code_size=10,
+        ),
+        loss_cls=dict(type='FocalLoss', use_sigmoid=True, gamma=2, alpha=0.25, reduction='mean', loss_weight=1.0),
+        # loss_iou=dict(type='CrossEntropyLoss', use_sigmoid=True, reduction='mean', loss_weight=0.0),
+        loss_bbox=dict(type='L1Loss', reduction='mean', loss_weight=0.25),
+
         bbox_roi_extractor=dict(
             type='RotatedSingleRoIExtractor',
             roi_layer=dict(
