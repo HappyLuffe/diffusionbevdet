@@ -1,3 +1,4 @@
+# CUDA_VISIBLE_DEVICES="2, 3" ./tools/dist_train.sh configs/diffusionbev/diffusionbev_kitti_L.py 2
 import mmcv
 import torch
 from mmcv.parallel import DataContainer as DC
@@ -9,6 +10,8 @@ from torch.nn import functional as F
 from mmdet3d.core import (Box3DMode, Coord3DMode, bbox3d2result,
                           merge_aug_bboxes_3d, show_result)
 from mmdet3d.ops import Voxelization
+from mmdet3d.models.utils import clip_sigmoid
+
 from mmdet.core import multi_apply
 from mmdet.models import DETECTORS
 from .. import builder
@@ -223,34 +226,43 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
                 extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
         )
 
-    def model_predictions(self, backbone_feats, images_whwhr, x, t, x_self_cond=None, clip_x_start=False):
+    def model_predictions(self, backbone_feats, img_metas, images_whwhr, x, t, x_self_cond=None, clip_x_start=False):
         x_boxes = torch.clamp(x, min=-1 * self.scale, max=self.scale)
         x_boxes = ((x_boxes / self.scale) + 1) / 2
         x_boxes = x_boxes * images_whwhr[:, None, :]        
 
          # *outputs_score=[bs, num_boxes, num_class+1], outputs_coord=[bs, num_boxes, 5]
-        
-        # drawimg(x_boxes[0])
+
 
         outputs_coord = x_boxes
+
+        temp = []
+        for i in range(outputs_coord.shape[0]):
+            temp.append(outputs_coord[i])
+
+        outputs_coord = temp
         
-        for i in range(6):
-            outputs_score, outputs_coord = self.pts_bbox_head.simple_test(backbone_feats, outputs_coord, t)
+        outs = self.pts_bbox_head.forward_train(backbone_feats, outputs_coord, t)
+
+        outs = (outs, )
+
+        bbox_list = self.pts_bbox_head.get_bboxes(outs, img_metas, rescale = False)
+
+        return bbox_list
+        # outputs_score, outputs_coord = self.pts_bbox_head.forward_train(backbone_feats, outputs_coord, t)
             
-        # drawimg(outputs_coord[0])
 
-        x_start = outputs_coord
-        x_start = x_start / images_whwhr[:, None, :]
-        x_start = (x_start * 2 - 1.) * self.scale
-        x_start = torch.clamp(x_start, min=-1 * self.scale, max=self.scale)
-        pred_noise = self.predict_noise_from_start(x, t, x_start)
+        # x_start = outputs_coord
+        # x_start = x_start / images_whwhr[:, None, :]
+        # x_start = (x_start * 2 - 1.) * self.scale
+        # x_start = torch.clamp(x_start, min=-1 * self.scale, max=self.scale)
+        # pred_noise = self.predict_noise_from_start(x, t, x_start)
 
-        return ModelPrediction(pred_noise, x_start), outputs_score, outputs_coord
+        # return ModelPrediction(pred_noise, x_start), outputs_score, outputs_coord
 
 
     @torch.no_grad()
-    def ddim_sample(self, backbone_feats, images_whwhr, points, clip_denoised=True, do_postprocess=True):
-        
+    def ddim_sample(self, backbone_feats, img_metas, points, clip_denoised=True, do_postprocess=True):
 
         w, h = 1600, 1408
         batch_size = len(points)
@@ -273,78 +285,63 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
             time_cond = torch.full((batch_size,), time, device=self.device, dtype=torch.long)
             self_cond = x_start if self.self_condition else None
             
+            bbox_list = [dict() for i in range(len(img_metas))]
+
+            bbox_list_1 = self.model_predictions(backbone_feats, img_metas, images_whwhr, img, time_cond, self_cond, clip_denoised)
+
+            bbox_pts = [
+                bbox3d2result(bboxes, scores, labels)
+                for bboxes, scores, labels in bbox_list_1
+            ]
+
+            # for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
+            #     result_dict['pts_bbox'] = pts_bbox
+
+            return bbox_pts
+
+
             # *outputs_score=[bs, num_boxes, num_class+1], outputs_coord=[bs, num_boxes, 5]
-            preds, outputs_scores, outputs_coords = self.model_predictions(backbone_feats, images_whwhr, img, time_cond, self_cond, clip_denoised)
-            pred_noise, x_start = preds.pred_noise, preds.pred_x_start
+            # preds, outputs_scores, outputs_coords = self.model_predictions(backbone_feats, img_metas, images_whwhr, img, time_cond, self_cond, clip_denoised)
+
+            # pred_noise, x_start = preds.pred_noise, preds.pred_x_start
 
 
-            # todo  这里需要修改
-            if self.box_renewal:
-                score_per_image, box_per_image = outputs_scores[0], outputs_coords[0]
-                threshold = 0.5
-                # score_per_image = torch.sigmoid(score_per_image)
-                value, _ = torch.max(score_per_image, -1, keepdim=False)
-                keep_idx = value > threshold
-                num_remain = torch.sum(keep_idx)
+            # # todo  这里需要修改
+            # if self.box_renewal:
+            #     score_per_image, box_per_image = outputs_scores[0], outputs_coords[0]
+            #     threshold = 0.5
+            #     # score_per_image = torch.sigmoid(score_per_image)
+            #     value, _ = torch.max(score_per_image, -1, keepdim=False)
+            #     keep_idx = value > threshold
+            #     num_remain = torch.sum(keep_idx)
 
-                pred_noise = pred_noise[:, keep_idx, :]
-                x_start = x_start[:, keep_idx, :]
-                img = img[:, keep_idx, :]
+            #     pred_noise = pred_noise[:, keep_idx, :]
+            #     x_start = x_start[:, keep_idx, :]
+            #     img = img[:, keep_idx, :]
 
-            if time_next < 0:
-                img = x_start
-                continue
-            alpha = self.alphas_cumprod[time]
-            alpha_next = self.alphas_cumprod[time_next]
+            # if time_next < 0:
+            #     img = x_start
+            #     continue
+            # alpha = self.alphas_cumprod[time]
+            # alpha_next = self.alphas_cumprod[time_next]
 
-            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
-            c = (1 - alpha_next - sigma ** 2).sqrt()
+            # sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            # c = (1 - alpha_next - sigma ** 2).sqrt()
 
-            noise = torch.randn_like(img)
+            # noise = torch.randn_like(img)
 
-            img = x_start * alpha_next.sqrt() + \
-                  c * pred_noise + \
-                  sigma * noise
+            # img = x_start * alpha_next.sqrt() + \
+            #       c * pred_noise + \
+            #       sigma * noise
             
-            # img_sizes = torch.tensor([w, h]).repeat(batch,1)
-            if self.box_renewal:
-                # *补充盒子数量
-                img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
+            # # img_sizes = torch.tensor([w, h]).repeat(batch,1)
+            # if self.box_renewal:
+            #     # *补充盒子数量
+            #     img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
 
-        # *nms
-        bbox_t, score_t, label_t = [], [], []
-        for i in range(batch_size):
-            scores, bboxes = outputs_scores[i].cpu(), outputs_coords[i].cpu()
-            det_bboxes, det_labels = multiclass_nms_rotated(
-                bboxes, scores, self.test_cfg['pts']['score_thr'], self.test_cfg['pts']['nms'], self.test_cfg['pts']['max_per_img'])
-            det_scores = det_bboxes[:, 5:].cuda().squeeze(1)
-            det_bboxes = det_bboxes[:, :5].cuda()
-            
-            # drawimg(det_bboxes)
+           
 
-            bbox_t.append(det_bboxes)
-            score_t.append(det_scores)
-            label_t.append(det_labels)
-
-        outputs_coords = torch.stack(bbox_t).cuda()
-        outputs_scores = torch.stack(score_t).cuda()
-        outputs_labels = torch.stack(label_t).cuda()
-
-        # *将坐标系进行转换，角度进行转换
-        outputs_coords = img2lidarbev(outputs_coords)
-
-        # drawlidar(outputs_coords[0])
-
-        
-
-        # *将二维BEV的bbox转换为三维的bbox, 对outputs_coord进行处理，加上高度数据
-        outputs_coords = addheight(outputs_coords, outputs_labels)
-
-        bbox_results = [
-            bbox3d2result(outputs_coords[i], outputs_scores[i], outputs_labels[i])
-            for i in range(batch_size)
-        ]
-        return bbox_results
+       
         
 
 
@@ -372,7 +369,7 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
 
     def extract_pts_feat(self, pts, img_feats, img_metas):
         voxels, num_points, coors = self.voxelize(pts)
-        voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
+        voxel_features = self.pts_voxel_encoder(voxels, num_points, coors,)
         batch_size = coors[-1, 0].item() + 1        
         x = self.pts_middle_encoder(voxel_features, coors, batch_size)
         x = self.pts_backbone(x)
@@ -463,19 +460,22 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         # *pts_feats.shape = [bs, 256, 200, 176]
         fuse_feats = pts_feats[0]
         fuse_feats = [fuse_feats]
+
+        # results = self.ddim_sample(fuse_feats, img_metas, points)
+
         
         res = multi_apply(self.noise_boxes_gen, gt_bboxes_3d, gt_labels_3d)
         # *d_boxes, d_noise, d_t为list，大小为batch size
         # *[XYWHR]
         d_boxes = [i.cuda() for i in res[0]] # proposal
-        d_noise = [i.cuda() for i in res[1]]
+        # d_noise = [i.cuda() for i in res[1]]
         d_t = [i.cuda() for i in res[2]]
-        gt_bev_boxes = [i.cuda() for i in res[3]]
-        gt_labels = [i.cuda() for i in res[4]]
+        # gt_bev_boxes = [i.cuda() for i in res[3]]
+        # gt_labels = [i.cuda() for i in res[4]]
 
 
         # *航向角的坐标系还需要处理
-        gt_bev_boxes = lidarbev2img(gt_bev_boxes)
+        # gt_bev_boxes = lidarbev2img(gt_bev_boxes)
 
         losses = dict()
 
@@ -484,10 +484,16 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         # drawimg(d_boxes[0])
         # drawimg(gt_bev_boxes[0])
 
-        roi_losses = self.pts_bbox_head.forward_train(fuse_feats, d_boxes, gt_bev_boxes, gt_labels, d_t)
-        losses.update(roi_losses)
+        outs = self.pts_bbox_head.forward_train(fuse_feats, d_boxes, d_t)
+        outs = (outs, )
+        losses = dict()
+        loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
+        loss_pts = self.pts_bbox_head.loss(*loss_inputs)
+        losses.update(loss_pts)
         return losses
         
+    
+
     def simple_test(self, points, img_metas, img=None, rescale=False):
         img_feats, pts_feats = self.extract_feat(
             points, img=img, img_metas=img_metas)
@@ -495,7 +501,8 @@ class DiffusionBEVDetector(MVXTwoStageDetector):
         fuse_feats = pts_feats[0]
         fuse_feats = [fuse_feats]
 
-        results = self.ddim_sample(fuse_feats, None, points)
+
+        results = self.ddim_sample(fuse_feats, img_metas, points)
         return results
 
     # def aug_test(self, points, img_metas, imgs=None, rescale=False):

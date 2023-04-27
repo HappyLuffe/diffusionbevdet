@@ -19,6 +19,7 @@ from .ssd3dnet import SSD3DNet
 from .votenet import VoteNet
 from .voxelnet import VoxelNet
 from .diffusionbev import DiffusionBEVDetector
+from .transfusion import TransFusionDetector
 
 
 __all__ = [
@@ -26,5 +27,5 @@ __all__ = [
     'DynamicMVXFasterRCNN', 'MVXFasterRCNN', 'PartA2', 'VoteNet', 'H3DNet',
     'CenterPoint', 'SSD3DNet', 'ImVoteNet', 'SingleStageMono3DDetector',
     'FCOSMono3D', 'ImVoxelNet', 'GroupFree3DNet', 'PointRCNN', 'SMOKEMono3D',
-    'MinkSingleStage3DDetector', 'SASSD', 'DiffusionBEVDetector'
+    'MinkSingleStage3DDetector', 'SASSD', 'DiffusionBEVDetector', 'TransFusionDetector'
 ]

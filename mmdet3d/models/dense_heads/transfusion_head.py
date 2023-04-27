@@ -1,30 +1,25 @@
 import copy
+import numpy as np
 import torch
+from mmcv.cnn import ConvModule, build_conv_layer, kaiming_init
+from mmcv.runner import force_fp32
 from torch import nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
-from torch.nn.init import xavier_uniform_, constant_, xavier_normal_
 from torch.nn import Linear
+from torch.nn.init import xavier_uniform_, constant_, xavier_normal_
 
-from mmcv.cnn import ConvModule, build_conv_layer, kaiming_init
-from mmcv.runner import force_fp32
-
-from mmdet.core import build_bbox_coder, multi_apply, build_assigner, build_sampler, AssignResult
-
+from mmdet3d.core import (circle_nms, draw_heatmap_gaussian, gaussian_radius,
+                          xywhr2xyxyr, limit_period, PseudoSampler)
+from mmdet3d.core.bbox.structures import rotation_3d_in_axis
+from mmdet3d.core import Box3DMode, LiDARInstance3DBoxes
+from mmdet3d.models import builder
 from mmdet3d.models.builder import HEADS, build_loss
-from mmdet3d.core import (PseudoSampler, gaussian_radius, draw_heatmap_gaussian, circle_nms, xywhr2xyxyr)
 from mmdet3d.models.utils import clip_sigmoid
-
+from mmdet3d.models.fusion_layers import apply_3d_transformation
 # from mmdet3d.ops.iou3d.iou3d_utils import nms_gpu
-
-from mmrotate.core import rbbox2roi
-from mmrotate.models.roi_heads import OrientedStandardRoIHead
-from mmrotate.core import rbbox2result
-from mmrotate.models import build_roi_extractor
-
-
-
-import numpy as np
+from mmdet.core import build_bbox_coder, multi_apply, build_assigner, build_sampler, AssignResult
+# from mmdet3d.ops.roiaware_pool3d import points_in_boxes_batch
 
 
 class PositionEmbeddingLearned(nn.Module):
@@ -595,9 +590,8 @@ class FFN(nn.Module):
         return ret_dict
 
 
-
 @HEADS.register_module()
-class DiffusionBEVHead(nn.Module):
+class TransFusionHead(nn.Module):
     def __init__(self,
                  fuse_img=False,
                  num_views=0,
@@ -605,7 +599,7 @@ class DiffusionBEVHead(nn.Module):
                  out_size_factor_img=4,
                  num_proposals=128,
                  auxiliary=True,
-                 in_channels=256,
+                 in_channels=128 * 3,
                  hidden_channel=128,
                  num_classes=4,
                  # config for Transformer
@@ -633,8 +627,8 @@ class DiffusionBEVHead(nn.Module):
                  train_cfg=None,
                  test_cfg=None,
                  bbox_coder=None,
-                 bbox_roi_extractor=None):
-        super(DiffusionBEVHead, self).__init__()
+                 ):
+        super(TransFusionHead, self).__init__()
 
         self.num_classes = num_classes
         self.num_proposals = num_proposals
@@ -650,21 +644,19 @@ class DiffusionBEVHead(nn.Module):
             assert self.learnable_query_pos is False, "initialized by heatmap is conflicting with learnable query position"
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
-        self.fuse_img = fuse_img
-        self.use_sigmoid_cls = loss_cls.get('use_sigmoid', False)
 
+        self.use_sigmoid_cls = loss_cls.get('use_sigmoid', False)
         if not self.use_sigmoid_cls:
             self.num_classes += 1
-
         self.loss_cls = build_loss(loss_cls)
         self.loss_bbox = build_loss(loss_bbox)
         self.loss_iou = build_loss(loss_iou)
         self.loss_heatmap = build_loss(loss_heatmap)
 
-
         self.bbox_coder = build_bbox_coder(bbox_coder)
         self.sampling = False
 
+        # a shared convolution
         self.shared_conv = build_conv_layer(
             dict(type='Conv2d'),
             in_channels,
@@ -700,8 +692,6 @@ class DiffusionBEVHead(nn.Module):
             self.query_feat = nn.Parameter(torch.randn(1, hidden_channel, self.num_proposals))
             self.query_pos = nn.Parameter(torch.rand([1, self.num_proposals, 2]), requires_grad=learnable_query_pos)
 
-        self.bbox_roi_extractor = build_roi_extractor(bbox_roi_extractor)
-
         # transformer decoder layers for object query with LiDAR feature
         self.decoder = nn.ModuleList()
         for i in range(self.num_decoder_layers):
@@ -719,6 +709,41 @@ class DiffusionBEVHead(nn.Module):
             heads.update(dict(heatmap=(self.num_classes, num_heatmap_convs)))
             self.prediction_heads.append(FFN(hidden_channel, heads, conv_cfg=conv_cfg, norm_cfg=norm_cfg, bias=bias))
 
+        self.fuse_img = fuse_img
+        if self.fuse_img:
+            self.num_views = num_views
+            self.out_size_factor_img = out_size_factor_img
+            self.shared_conv_img = build_conv_layer(
+                dict(type='Conv2d'),
+                in_channels_img,  # channel of img feature map
+                hidden_channel,
+                kernel_size=3,
+                padding=1,
+                bias=bias,
+            )
+            self.heatmap_head_img = copy.deepcopy(self.heatmap_head)
+            # transformer decoder layers for img fusion
+            self.decoder.append(
+                TransformerDecoderLayer(
+                    hidden_channel, num_heads, ffn_channel, dropout, activation,
+                    self_posembed=PositionEmbeddingLearned(2, hidden_channel),
+                    cross_posembed=PositionEmbeddingLearned(2, hidden_channel),
+                ))
+            # cross-attention only layers for projecting img feature onto BEV
+            for i in range(num_views):
+                self.decoder.append(
+                    TransformerDecoderLayer(
+                        hidden_channel, num_heads, ffn_channel, dropout, activation,
+                        self_posembed=PositionEmbeddingLearned(2, hidden_channel),
+                        cross_posembed=PositionEmbeddingLearned(2, hidden_channel),
+                        cross_only=True,
+                    ))
+            self.fc = nn.Sequential(*[nn.Conv1d(hidden_channel, hidden_channel, kernel_size=1)])
+
+            heads = copy.deepcopy(common_heads)
+            heads.update(dict(heatmap=(self.num_classes, num_heatmap_convs)))
+            self.prediction_heads.append(FFN(hidden_channel * 2, heads, conv_cfg=conv_cfg, norm_cfg=norm_cfg, bias=bias))
+
         self.init_weights()
         self._init_assigner_sampler()
 
@@ -729,8 +754,6 @@ class DiffusionBEVHead(nn.Module):
 
         self.img_feat_pos = None
         self.img_feat_collapsed_pos = None
-
-        self.query_linear = torch.nn.Linear(25088, 128)
 
     def create_2D_grid(self, x_size, y_size):
         meshgrid = [[0, x_size - 1, x_size], [0, y_size - 1, y_size]]
@@ -771,58 +794,55 @@ class DiffusionBEVHead(nn.Module):
                 build_assigner(res) for res in self.train_cfg.assigner
             ]
 
-    def forward_train(self, 
-                      x,
-                      proposal_list = None,
-                      t = None,
-                      gt_bboxes_ignore=None,
-                      gt_masks=None):
-        
+    def forward_single(self, inputs, img_inputs, img_metas):
+        """Forward function for CenterPoint.
+
+        Args:
+            inputs (torch.Tensor): Input feature map with the shape of
+                [B, 512, 128(H), 128(W)]. (consistent with L748)
+
+        Returns:
+            list[dict]: Output results for tasks.
         """
-            x: list[ [BS, C, H, W] ] lenth: num_level_feat
-            proposal_list: list[ [num_proposal, 5] ] lenth: BS
-            gt_bboxes: list[ [num_gt, 5] ] lenth: BS
-            gt_labels: list[ [num_gt] ] lenth: BS
-        """
+        batch_size = inputs.shape[0]
+        lidar_feat = self.shared_conv(inputs)
 
-        for i in range(len(proposal_list)):
-            bboxes = proposal_list[i].cpu().numpy()
-            lenth = np.size(bboxes, 0)
-            temp = np.full((lenth), i)
-            bboxes = np.insert(bboxes, 0, temp, axis=1)
-            proposal_list[i] = torch.from_numpy(bboxes).cuda()
-
-
-        # * rois[BS*num_proposal, 6] bbox_feats[BS*num_proposal, 512, 7, 7]
-        # rois = rbbox2roi(proposal_list)
-        # query_feat = self.bbox_roi_extractor(x[:self.bbox_roi_extractor.num_inputs], rois)
-        # query_feat = query_feat.view(rois.shape[0], -1)
-        # query_feat = self.query_linear(query_feat)
-        
-        x = x[0]
-        batch_size = x.shape[0]
-        # query_feat = query_feat.view(batch_size, self.num_proposals, -1).permute(0, 2, 1)
-        # query_feat = self.query_feat.repeat(batch_size, 1, 1)  # [BS, C, num_proposals]
-
-
-        lidar_feat = self.shared_conv(x)
-        # query_pos = self.query_pos.repeat(batch_size, 1, 1).to(lidar_feat.device)  # [BS, num_proposals, 2]
-
-        lidar_feat_flatten = lidar_feat.view(batch_size, lidar_feat.shape[1], -1)
+        #################################
+        # image to BEV
+        #################################
+        lidar_feat_flatten = lidar_feat.view(batch_size, lidar_feat.shape[1], -1)  # [BS, C, H*W]
         bev_pos = self.bev_pos.repeat(batch_size, 1, 1).to(lidar_feat.device)
 
+        if self.fuse_img:
+            img_feat = self.shared_conv_img(img_inputs)  # [BS * n_views, C, H, W]
+
+            img_h, img_w, num_channel = img_inputs.shape[-2], img_inputs.shape[-1], img_feat.shape[1]
+            raw_img_feat = img_feat.view(batch_size, self.num_views, num_channel, img_h, img_w).permute(0, 2, 3, 1, 4) # [BS, C, H, n_views, W]
+            img_feat = raw_img_feat.reshape(batch_size, num_channel, img_h, img_w * self.num_views)  # [BS, C, H, n_views*W]
+            img_feat_collapsed = img_feat.max(2).values
+            img_feat_collapsed = self.fc(img_feat_collapsed).view(batch_size, num_channel, img_w * self.num_views)
+
+            # positional encoding for image guided query initialization
+            if self.img_feat_collapsed_pos is None:
+                img_feat_collapsed_pos = self.img_feat_collapsed_pos = self.create_2D_grid(1, img_feat_collapsed.shape[-1]).to(img_feat.device)
+            else:
+                img_feat_collapsed_pos = self.img_feat_collapsed_pos
+
+            bev_feat = lidar_feat_flatten
+            for idx_view in range(self.num_views):
+                bev_feat = self.decoder[2 + idx_view](bev_feat, img_feat_collapsed[..., img_w * idx_view:img_w * (idx_view + 1)], bev_pos, img_feat_collapsed_pos[:, img_w * idx_view:img_w * (idx_view + 1)])
+
+        #################################
+        # image guided query initialization
+        #################################
         if self.initialize_by_heatmap:
             dense_heatmap = self.heatmap_head(lidar_feat)
             dense_heatmap_img = None
-            # if self.fuse_img:
-            #     dense_heatmap_img = self.heatmap_head_img(bev_feat.view(lidar_feat.shape))  # [BS, num_classes, H, W]
-            #     heatmap = (dense_heatmap.detach().sigmoid() + dense_heatmap_img.detach().sigmoid()) / 2
-            # else:
-                # heatmap = dense_heatmap.detach().sigmoid()
-
-            if not self.fuse_img:
+            if self.fuse_img:
+                dense_heatmap_img = self.heatmap_head_img(bev_feat.view(lidar_feat.shape))  # [BS, num_classes, H, W]
+                heatmap = (dense_heatmap.detach().sigmoid() + dense_heatmap_img.detach().sigmoid()) / 2
+            else:
                 heatmap = dense_heatmap.detach().sigmoid()
-
             padding = self.nms_kernel_size // 2
             local_max = torch.zeros_like(heatmap)
             # equals to nms radius = voxel_size * out_size_factor * kenel_size
@@ -833,9 +853,6 @@ class DiffusionBEVHead(nn.Module):
                 local_max[:, 8, ] = F.max_pool2d(heatmap[:, 8], kernel_size=1, stride=1, padding=0)
                 local_max[:, 9, ] = F.max_pool2d(heatmap[:, 9], kernel_size=1, stride=1, padding=0)
             elif self.test_cfg['dataset'] == 'Waymo':  # for Pedestrian & Cyclist in Waymo
-                local_max[:, 1, ] = F.max_pool2d(heatmap[:, 1], kernel_size=1, stride=1, padding=0)
-                local_max[:, 2, ] = F.max_pool2d(heatmap[:, 2], kernel_size=1, stride=1, padding=0)
-            elif self.test_cfg['dataset'] == 'KITTI':  # for Pedestrian & Cyclist in Waymo
                 local_max[:, 1, ] = F.max_pool2d(heatmap[:, 1], kernel_size=1, stride=1, padding=0)
                 local_max[:, 2, ] = F.max_pool2d(heatmap[:, 2], kernel_size=1, stride=1, padding=0)
             heatmap = heatmap * (heatmap == local_max)
@@ -858,6 +875,9 @@ class DiffusionBEVHead(nn.Module):
             query_feat = self.query_feat.repeat(batch_size, 1, 1)  # [BS, C, num_proposals]
             base_xyz = self.query_pos.repeat(batch_size, 1, 1).to(lidar_feat.device)  # [BS, num_proposals, 2]
 
+        #################################
+        # transformer decoder layer (LiDAR feature as K,V)
+        #################################
         ret_dicts = []
         for i in range(self.num_decoder_layers):
             prefix = 'last_' if (i == self.num_decoder_layers - 1) else f'{i}head_'
@@ -875,6 +895,119 @@ class DiffusionBEVHead(nn.Module):
 
             # for next level positional embedding
             query_pos = res_layer['center'].detach().clone().permute(0, 2, 1)
+
+        #################################
+        # transformer decoder layer (img feature as K,V)
+        #################################
+        if self.fuse_img:
+            # positional encoding for image fusion
+            img_feat = raw_img_feat.permute(0, 3, 1, 2, 4) # [BS, n_views, C, H, W]
+            img_feat_flatten = img_feat.view(batch_size, self.num_views, num_channel, -1)  # [BS, n_views, C, H*W]
+            if self.img_feat_pos is None:
+                (h, w) = img_inputs.shape[-2], img_inputs.shape[-1]
+                img_feat_pos = self.img_feat_pos = self.create_2D_grid(h, w).to(img_feat_flatten.device)
+            else:
+                img_feat_pos = self.img_feat_pos
+
+            prev_query_feat = query_feat.detach().clone()
+            query_feat = torch.zeros_like(query_feat)  # create new container for img query feature
+            query_pos_realmetric = query_pos.permute(0, 2, 1) * self.test_cfg['out_size_factor'] * self.test_cfg['voxel_size'][0] + self.test_cfg['pc_range'][0]
+            query_pos_3d = torch.cat([query_pos_realmetric, res_layer['height']], dim=1).detach().clone()
+            if 'vel' in res_layer:
+                vel = copy.deepcopy(res_layer['vel'].detach())
+            else:
+                vel = None
+            pred_boxes = self.bbox_coder.decode(
+                copy.deepcopy(res_layer['heatmap'].detach()),
+                copy.deepcopy(res_layer['rot'].detach()),
+                copy.deepcopy(res_layer['dim'].detach()),
+                copy.deepcopy(res_layer['center'].detach()),
+                copy.deepcopy(res_layer['height'].detach()),
+                vel,
+            )
+
+            on_the_image_mask = torch.ones([batch_size, self.num_proposals]).to(query_pos_3d.device) * -1
+
+            for sample_idx in range(batch_size if self.fuse_img else 0):
+                lidar2img_rt = query_pos_3d.new_tensor(img_metas[sample_idx]['lidar2img'])
+                img_scale_factor = (
+                    query_pos_3d.new_tensor(img_metas[sample_idx]['scale_factor'][:2]
+                                            if 'scale_factor' in img_metas[sample_idx].keys() else [1.0, 1.0]))
+                img_flip = img_metas[sample_idx]['flip'] if 'flip' in img_metas[sample_idx].keys() else False
+                img_crop_offset = (
+                    query_pos_3d.new_tensor(img_metas[sample_idx]['img_crop_offset'])
+                    if 'img_crop_offset' in img_metas[sample_idx].keys() else 0)
+                img_shape = img_metas[sample_idx]['img_shape'][:2]
+                img_pad_shape = img_metas[sample_idx]['input_shape'][:2]
+                boxes = LiDARInstance3DBoxes(pred_boxes[sample_idx]['bboxes'][:, :7], box_dim=7)
+                query_pos_3d_with_corners = torch.cat([query_pos_3d[sample_idx], boxes.corners.permute(2, 0, 1).view(3, -1)], dim=-1)  # [3, num_proposals] + [3, num_proposals*8]
+                # transform point clouds back to original coordinate system by reverting the data augmentation
+                if batch_size == 1:  # skip during inference to save time
+                    points = query_pos_3d_with_corners.T
+                else:
+                    points = apply_3d_transformation(query_pos_3d_with_corners.T, 'LIDAR', img_metas[sample_idx], reverse=True).detach()
+                num_points = points.shape[0]
+
+                for view_idx in range(self.num_views):
+                    pts_4d = torch.cat([points, points.new_ones(size=(num_points, 1))], dim=-1)
+                    pts_2d = pts_4d @ lidar2img_rt[view_idx].t()
+
+                    pts_2d[:, 2] = torch.clamp(pts_2d[:, 2], min=1e-5)
+                    pts_2d[:, 0] /= pts_2d[:, 2]
+                    pts_2d[:, 1] /= pts_2d[:, 2]
+
+                    # img transformation: scale -> crop -> flip
+                    # the image is resized by img_scale_factor
+                    img_coors = pts_2d[:, 0:2] * img_scale_factor  # Nx2
+                    img_coors -= img_crop_offset
+
+                    # grid sample, the valid grid range should be in [-1,1]
+                    coor_x, coor_y = torch.split(img_coors, 1, dim=1)  # each is Nx1
+
+                    if img_flip:
+                        # by default we take it as horizontal flip
+                        # use img_shape before padding for flip
+                        orig_h, orig_w = img_shape
+                        coor_x = orig_w - coor_x
+
+                    coor_x, coor_corner_x = coor_x[0:self.num_proposals, :], coor_x[self.num_proposals:, :]
+                    coor_y, coor_corner_y = coor_y[0:self.num_proposals, :], coor_y[self.num_proposals:, :]
+                    coor_corner_x = coor_corner_x.reshape(self.num_proposals, 8, 1)
+                    coor_corner_y = coor_corner_y.reshape(self.num_proposals, 8, 1)
+                    coor_corner_xy = torch.cat([coor_corner_x, coor_corner_y], dim=-1)
+
+                    h, w = img_pad_shape
+                    on_the_image = (coor_x > 0) * (coor_x < w) * (coor_y > 0) * (coor_y < h)
+                    on_the_image = on_the_image.squeeze()
+                    # skip the following computation if no object query fall on current image
+                    if on_the_image.sum() <= 1:
+                        continue
+                    on_the_image_mask[sample_idx, on_the_image] = view_idx
+
+                    # add spatial constraint
+                    center_ys = (coor_y[on_the_image] / self.out_size_factor_img)
+                    center_xs = (coor_x[on_the_image] / self.out_size_factor_img)
+                    centers = torch.cat([center_xs, center_ys], dim=-1).int()  # center on the feature map
+                    corners = (coor_corner_xy[on_the_image].max(1).values - coor_corner_xy[on_the_image].min(1).values) / self.out_size_factor_img
+                    radius = torch.ceil(corners.norm(dim=-1, p=2) / 2).int()  # radius of the minimum circumscribed circle of the wireframe
+                    sigma = (radius * 2 + 1) / 6.0
+                    distance = (centers[:, None, :] - (img_feat_pos - 0.5)).norm(dim=-1) ** 2
+                    gaussian_mask = (-distance / (2 * sigma[:, None] ** 2)).exp()
+                    gaussian_mask[gaussian_mask < torch.finfo(torch.float32).eps] = 0
+                    attn_mask = gaussian_mask
+
+                    query_feat_view = prev_query_feat[sample_idx, :, on_the_image]
+                    query_pos_view = torch.cat([center_xs, center_ys], dim=-1)
+                    query_feat_view = self.decoder[self.num_decoder_layers](query_feat_view[None], img_feat_flatten[sample_idx:sample_idx + 1, view_idx], query_pos_view[None], img_feat_pos, attn_mask=attn_mask.log())
+                    query_feat[sample_idx, :, on_the_image] = query_feat_view.clone()
+
+            self.on_the_image_mask = (on_the_image_mask != -1)
+            res_layer = self.prediction_heads[self.num_decoder_layers](torch.cat([query_feat, prev_query_feat], dim=1))
+            res_layer['center'] = res_layer['center'] + query_pos.permute(0, 2, 1)
+            for key, value in res_layer.items():
+                pred_dim = value.shape[1]
+                res_layer[key][~self.on_the_image_mask.unsqueeze(1).repeat(1, pred_dim, 1)] = first_res_layer[key][~self.on_the_image_mask.unsqueeze(1).repeat(1, pred_dim, 1)]
+            ret_dicts.append(res_layer)
 
         if self.initialize_by_heatmap:
             ret_dicts[0]['query_heatmap_score'] = heatmap.gather(index=top_proposals_index[:, None, :].expand(-1, self.num_classes, -1), dim=-1)  # [bs, num_classes, num_proposals]
@@ -896,103 +1029,62 @@ class DiffusionBEVHead(nn.Module):
                 new_res[key] = ret_dicts[0][key]
         return [new_res]
 
-    @force_fp32(apply_to=('preds_dicts'))
-    def loss(self, gt_bboxes_3d, gt_labels_3d, preds_dicts, **kwargs):
-        if self.initialize_by_heatmap:
-            labels, label_weights, bbox_targets, bbox_weights, ious, num_pos, matched_ious, heatmap = self.get_targets(gt_bboxes_3d, gt_labels_3d, preds_dicts[0])
-        else:
-            labels, label_weights, bbox_targets, bbox_weights, ious, num_pos, matched_ious = self.get_targets(gt_bboxes_3d, gt_labels_3d, preds_dicts[0])
-        if hasattr(self, 'on_the_image_mask'):
-            label_weights = label_weights * self.on_the_image_mask
-            bbox_weights = bbox_weights * self.on_the_image_mask[:, :, None]
-            num_pos = bbox_weights.max(-1).values.sum()
-        preds_dict = preds_dicts[0][0]
-        loss_dict = dict()
+    def forward(self, feats, img_feats, img_metas):
+        """Forward pass.
 
-        if self.initialize_by_heatmap:
-            # compute heatmap loss
-            loss_heatmap = self.loss_heatmap(clip_sigmoid(preds_dict['dense_heatmap']), heatmap, avg_factor=max(heatmap.eq(1).float().sum().item(), 1))
-            loss_dict['loss_heatmap'] = loss_heatmap
+        Args:
+            feats (list[torch.Tensor]): Multi-level features, e.g.,
+                features produced by FPN.
 
-        # compute loss for each layer
-        for idx_layer in range(self.num_decoder_layers if self.auxiliary else 1):
-            if idx_layer == self.num_decoder_layers - 1 or (idx_layer == 0 and self.auxiliary is False):
-                prefix = 'layer_-1'
-            else:
-                prefix = f'layer_{idx_layer}'
-
-            layer_labels = labels[..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals].reshape(-1)
-            layer_label_weights = label_weights[..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals].reshape(-1)
-            layer_score = preds_dict['heatmap'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
-            layer_cls_score = layer_score.permute(0, 2, 1).reshape(-1, self.num_classes)
-            layer_loss_cls = self.loss_cls(layer_cls_score, layer_labels, layer_label_weights, avg_factor=max(num_pos, 1))
-
-            layer_center = preds_dict['center'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
-            layer_height = preds_dict['height'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
-            layer_rot = preds_dict['rot'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
-            layer_dim = preds_dict['dim'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
-            preds = torch.cat([layer_center, layer_height, layer_dim, layer_rot], dim=1).permute(0, 2, 1)  # [BS, num_proposals, code_size]
-            if 'vel' in preds_dict.keys():
-                layer_vel = preds_dict['vel'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
-                preds = torch.cat([layer_center, layer_height, layer_dim, layer_rot, layer_vel], dim=1).permute(0, 2, 1)  # [BS, num_proposals, code_size]
-            code_weights = self.train_cfg.get('code_weights', None)
-            layer_bbox_weights = bbox_weights[:, idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals, :]
-            layer_reg_weights = layer_bbox_weights * layer_bbox_weights.new_tensor(code_weights)
-            layer_bbox_targets = bbox_targets[:, idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals, :]
-            layer_loss_bbox = self.loss_bbox(preds, layer_bbox_targets, layer_reg_weights, avg_factor=max(num_pos, 1))
-
-            # layer_iou = preds_dict['iou'][..., idx_layer*self.num_proposals:(idx_layer+1)*self.num_proposals].squeeze(1)
-            # layer_iou_target = ious[..., idx_layer*self.num_proposals:(idx_layer+1)*self.num_proposals]
-            # layer_loss_iou = self.loss_iou(layer_iou, layer_iou_target, layer_bbox_weights.max(-1).values, avg_factor=max(num_pos, 1))
-
-            loss_dict[f'{prefix}_loss_cls'] = layer_loss_cls
-            loss_dict[f'{prefix}_loss_bbox'] = layer_loss_bbox
-            # loss_dict[f'{prefix}_loss_iou'] = layer_loss_iou
-
-        loss_dict[f'matched_ious'] = layer_loss_cls.new_tensor(matched_ious)
-
-        return loss_dict
+        Returns:
+            tuple(list[dict]): Output results. first index by level, second index by layer
+        """
+        if img_feats is None:
+            img_feats = [None]
+        res = multi_apply(self.forward_single, feats, img_feats, [img_metas])
+        assert len(res) == 1, "only support one level features."
+        return res
 
     def get_targets(self, gt_bboxes_3d, gt_labels_3d, preds_dict):
-            """Generate training targets.
+        """Generate training targets.
 
-            Args:
-                gt_bboxes_3d (:obj:`LiDARInstance3DBoxes`): Ground truth gt boxes.
-                gt_labels_3d (torch.Tensor): Labels of boxes.
-                preds_dicts (tuple of dict): first index by layer (default 1)
-            Returns:
-                tuple[torch.Tensor]: Tuple of target including \
-                    the following results in order.
+        Args:
+            gt_bboxes_3d (:obj:`LiDARInstance3DBoxes`): Ground truth gt boxes.
+            gt_labels_3d (torch.Tensor): Labels of boxes.
+            preds_dicts (tuple of dict): first index by layer (default 1)
+        Returns:
+            tuple[torch.Tensor]: Tuple of target including \
+                the following results in order.
 
-                    - torch.Tensor: classification target.  [BS, num_proposals]
-                    - torch.Tensor: classification weights (mask)  [BS, num_proposals]
-                    - torch.Tensor: regression target. [BS, num_proposals, 8]
-                    - torch.Tensor: regression weights. [BS, num_proposals, 8]
-            """
-            # change preds_dict into list of dict (index by batch_id)
-            # preds_dict[0]['center'].shape [bs, 3, num_proposal]
-            list_of_pred_dict = []
-            for batch_idx in range(len(gt_bboxes_3d)):
-                pred_dict = {}
-                for key in preds_dict[0].keys():
-                    pred_dict[key] = preds_dict[0][key][batch_idx:batch_idx + 1]
-                list_of_pred_dict.append(pred_dict)
+                - torch.Tensor: classification target.  [BS, num_proposals]
+                - torch.Tensor: classification weights (mask)  [BS, num_proposals]
+                - torch.Tensor: regression target. [BS, num_proposals, 8]
+                - torch.Tensor: regression weights. [BS, num_proposals, 8]
+        """
+        # change preds_dict into list of dict (index by batch_id)
+        # preds_dict[0]['center'].shape [bs, 3, num_proposal]
+        list_of_pred_dict = []
+        for batch_idx in range(len(gt_bboxes_3d)):
+            pred_dict = {}
+            for key in preds_dict[0].keys():
+                pred_dict[key] = preds_dict[0][key][batch_idx:batch_idx + 1]
+            list_of_pred_dict.append(pred_dict)
 
-            assert len(gt_bboxes_3d) == len(list_of_pred_dict)
+        assert len(gt_bboxes_3d) == len(list_of_pred_dict)
 
-            res_tuple = multi_apply(self.get_targets_single, gt_bboxes_3d, gt_labels_3d, list_of_pred_dict, np.arange(len(gt_labels_3d)))
-            labels = torch.cat(res_tuple[0], dim=0)
-            label_weights = torch.cat(res_tuple[1], dim=0)
-            bbox_targets = torch.cat(res_tuple[2], dim=0)
-            bbox_weights = torch.cat(res_tuple[3], dim=0)
-            ious = torch.cat(res_tuple[4], dim=0)
-            num_pos = np.sum(res_tuple[5])
-            matched_ious = np.mean(res_tuple[6])
-            if self.initialize_by_heatmap:
-                heatmap = torch.cat(res_tuple[7], dim=0)
-                return labels, label_weights, bbox_targets, bbox_weights, ious, num_pos, matched_ious, heatmap
-            else:
-                return labels, label_weights, bbox_targets, bbox_weights, ious, num_pos, matched_ious
+        res_tuple = multi_apply(self.get_targets_single, gt_bboxes_3d, gt_labels_3d, list_of_pred_dict, np.arange(len(gt_labels_3d)))
+        labels = torch.cat(res_tuple[0], dim=0)
+        label_weights = torch.cat(res_tuple[1], dim=0)
+        bbox_targets = torch.cat(res_tuple[2], dim=0)
+        bbox_weights = torch.cat(res_tuple[3], dim=0)
+        ious = torch.cat(res_tuple[4], dim=0)
+        num_pos = np.sum(res_tuple[5])
+        matched_ious = np.mean(res_tuple[6])
+        if self.initialize_by_heatmap:
+            heatmap = torch.cat(res_tuple[7], dim=0)
+            return labels, label_weights, bbox_targets, bbox_weights, ious, num_pos, matched_ious, heatmap
+        else:
+            return labels, label_weights, bbox_targets, bbox_weights, ious, num_pos, matched_ious
 
     def get_targets_single(self, gt_bboxes_3d, gt_labels_3d, preds_dict, batch_idx):
         """Generate training targets for a single sample.
@@ -1024,8 +1116,6 @@ class DiffusionBEVHead(nn.Module):
             vel = copy.deepcopy(preds_dict['vel'].detach())
         else:
             vel = None
-
-        vel = None
 
         boxes_dict = self.bbox_coder.decode(score, rot, dim, center, height, vel)  # decode the prediction to real world metric bbox
         bboxes_tensor = boxes_dict[0]['bboxes']
@@ -1124,103 +1214,165 @@ class DiffusionBEVHead(nn.Module):
             mean_iou = ious[pos_inds].sum() / max(len(pos_inds), 1)
             return labels[None], label_weights[None], bbox_targets[None], bbox_weights[None], ious[None], int(pos_inds.shape[0]), float(mean_iou)
 
+    @force_fp32(apply_to=('preds_dicts'))
+    def loss(self, gt_bboxes_3d, gt_labels_3d, preds_dicts, **kwargs):
+        """Loss function for CenterHead.
+
+        Args:
+            gt_bboxes_3d (list[:obj:`LiDARInstance3DBoxes`]): Ground
+                truth gt boxes.
+            gt_labels_3d (list[torch.Tensor]): Labels of boxes.
+            preds_dicts (list[list[dict]]): Output of forward function.
+
+        Returns:
+            dict[str:torch.Tensor]: Loss of heatmap and bbox of each task.
+        """
+        if self.initialize_by_heatmap:
+            labels, label_weights, bbox_targets, bbox_weights, ious, num_pos, matched_ious, heatmap = self.get_targets(gt_bboxes_3d, gt_labels_3d, preds_dicts[0])
+        else:
+            labels, label_weights, bbox_targets, bbox_weights, ious, num_pos, matched_ious = self.get_targets(gt_bboxes_3d, gt_labels_3d, preds_dicts[0])
+        if hasattr(self, 'on_the_image_mask'):
+            label_weights = label_weights * self.on_the_image_mask
+            bbox_weights = bbox_weights * self.on_the_image_mask[:, :, None]
+            num_pos = bbox_weights.max(-1).values.sum()
+        preds_dict = preds_dicts[0][0]
+        loss_dict = dict()
+
+        if self.initialize_by_heatmap:
+            # compute heatmap loss
+            loss_heatmap = self.loss_heatmap(clip_sigmoid(preds_dict['dense_heatmap']), heatmap, avg_factor=max(heatmap.eq(1).float().sum().item(), 1))
+            loss_dict['loss_heatmap'] = loss_heatmap
+
+        # compute loss for each layer
+        for idx_layer in range(self.num_decoder_layers if self.auxiliary else 1):
+            if idx_layer == self.num_decoder_layers - 1 or (idx_layer == 0 and self.auxiliary is False):
+                prefix = 'layer_-1'
+            else:
+                prefix = f'layer_{idx_layer}'
+
+            layer_labels = labels[..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals].reshape(-1)
+            layer_label_weights = label_weights[..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals].reshape(-1)
+            layer_score = preds_dict['heatmap'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
+            layer_cls_score = layer_score.permute(0, 2, 1).reshape(-1, self.num_classes)
+            layer_loss_cls = self.loss_cls(layer_cls_score, layer_labels, layer_label_weights, avg_factor=max(num_pos, 1))
+
+            layer_center = preds_dict['center'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
+            layer_height = preds_dict['height'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
+            layer_rot = preds_dict['rot'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
+            layer_dim = preds_dict['dim'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
+            preds = torch.cat([layer_center, layer_height, layer_dim, layer_rot], dim=1).permute(0, 2, 1)  # [BS, num_proposals, code_size]
+            if 'vel' in preds_dict.keys():
+                layer_vel = preds_dict['vel'][..., idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals]
+                preds = torch.cat([layer_center, layer_height, layer_dim, layer_rot, layer_vel], dim=1).permute(0, 2, 1)  # [BS, num_proposals, code_size]
+            code_weights = self.train_cfg.get('code_weights', None)
+            layer_bbox_weights = bbox_weights[:, idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals, :]
+            layer_reg_weights = layer_bbox_weights * layer_bbox_weights.new_tensor(code_weights)
+            layer_bbox_targets = bbox_targets[:, idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals, :]
+            layer_loss_bbox = self.loss_bbox(preds, layer_bbox_targets, layer_reg_weights, avg_factor=max(num_pos, 1))
+
+            # layer_iou = preds_dict['iou'][..., idx_layer*self.num_proposals:(idx_layer+1)*self.num_proposals].squeeze(1)
+            # layer_iou_target = ious[..., idx_layer*self.num_proposals:(idx_layer+1)*self.num_proposals]
+            # layer_loss_iou = self.loss_iou(layer_iou, layer_iou_target, layer_bbox_weights.max(-1).values, avg_factor=max(num_pos, 1))
+
+            loss_dict[f'{prefix}_loss_cls'] = layer_loss_cls
+            loss_dict[f'{prefix}_loss_bbox'] = layer_loss_bbox
+            # loss_dict[f'{prefix}_loss_iou'] = layer_loss_iou
+
+        loss_dict[f'matched_ious'] = layer_loss_cls.new_tensor(matched_ious)
+
+        return loss_dict
+
     def get_bboxes(self, preds_dicts, img_metas, img=None, rescale=False, for_roi=False):
-            """Generate bboxes from bbox head predictions.
+        """Generate bboxes from bbox head predictions.
 
-            Args:
-                preds_dicts (tuple[list[dict]]): Prediction results.
+        Args:
+            preds_dicts (tuple[list[dict]]): Prediction results.
 
-            Returns:
-                list[list[dict]]: Decoded bbox, scores and labels for each layer & each batch
-            """
-            rets = []
-            for layer_id, preds_dict in enumerate(preds_dicts):
-                batch_size = preds_dict[0]['heatmap'].shape[0]
-                batch_score = preds_dict[0]['heatmap'][..., -self.num_proposals:].sigmoid()
-                # if self.loss_iou.loss_weight != 0:
-                #    batch_score = torch.sqrt(batch_score * preds_dict[0]['iou'][..., -self.num_proposals:].sigmoid())
-                one_hot = F.one_hot(self.query_labels, num_classes=self.num_classes).permute(0, 2, 1)
-                batch_score = batch_score * preds_dict[0]['query_heatmap_score'] * one_hot
+        Returns:
+            list[list[dict]]: Decoded bbox, scores and labels for each layer & each batch
+        """
+        rets = []
+        for layer_id, preds_dict in enumerate(preds_dicts):
+            batch_size = preds_dict[0]['heatmap'].shape[0]
+            batch_score = preds_dict[0]['heatmap'][..., -self.num_proposals:].sigmoid()
+            # if self.loss_iou.loss_weight != 0:
+            #    batch_score = torch.sqrt(batch_score * preds_dict[0]['iou'][..., -self.num_proposals:].sigmoid())
+            one_hot = F.one_hot(self.query_labels, num_classes=self.num_classes).permute(0, 2, 1)
+            batch_score = batch_score * preds_dict[0]['query_heatmap_score'] * one_hot
 
-                batch_center = preds_dict[0]['center'][..., -self.num_proposals:]
-                batch_height = preds_dict[0]['height'][..., -self.num_proposals:]
-                batch_dim = preds_dict[0]['dim'][..., -self.num_proposals:]
-                batch_rot = preds_dict[0]['rot'][..., -self.num_proposals:]
-                batch_vel = None
-                # if 'vel' in preds_dict[0]:
-                #     batch_vel = preds_dict[0]['vel'][..., -self.num_proposals:]
+            batch_center = preds_dict[0]['center'][..., -self.num_proposals:]
+            batch_height = preds_dict[0]['height'][..., -self.num_proposals:]
+            batch_dim = preds_dict[0]['dim'][..., -self.num_proposals:]
+            batch_rot = preds_dict[0]['rot'][..., -self.num_proposals:]
+            batch_vel = None
+            if 'vel' in preds_dict[0]:
+                batch_vel = preds_dict[0]['vel'][..., -self.num_proposals:]
 
-                temp = self.bbox_coder.decode(batch_score, batch_rot, batch_dim, batch_center, batch_height, batch_vel, filter=True)
+            temp = self.bbox_coder.decode(batch_score, batch_rot, batch_dim, batch_center, batch_height, batch_vel, filter=True)
 
-                if self.test_cfg['dataset'] == 'nuScenes':
-                    self.tasks = [
-                        dict(num_class=8, class_names=[], indices=[0, 1, 2, 3, 4, 5, 6, 7], radius=-1),
-                        dict(num_class=1, class_names=['pedestrian'], indices=[8], radius=0.175),
-                        dict(num_class=1, class_names=['traffic_cone'], indices=[9], radius=0.175),
-                    ]
-                elif self.test_cfg['dataset'] == 'Waymo':
-                    self.tasks = [
-                        dict(num_class=1, class_names=['Car'], indices=[0], radius=0.7),
-                        dict(num_class=1, class_names=['Pedestrian'], indices=[1], radius=0.7),
-                        dict(num_class=1, class_names=['Cyclist'], indices=[2], radius=0.7),
-                    ]
-                elif self.test_cfg['dataset'] == 'KITTI':
-                    self.tasks = [
-                        dict(num_class=1, class_names=['Car'], indices=[0], radius=0.7),
-                        dict(num_class=1, class_names=['Pedestrian'], indices=[1], radius=0.7),
-                        dict(num_class=1, class_names=['Cyclist'], indices=[2], radius=0.7),
-                    ]
+            if self.test_cfg['dataset'] == 'nuScenes':
+                self.tasks = [
+                    dict(num_class=8, class_names=[], indices=[0, 1, 2, 3, 4, 5, 6, 7], radius=-1),
+                    dict(num_class=1, class_names=['pedestrian'], indices=[8], radius=0.175),
+                    dict(num_class=1, class_names=['traffic_cone'], indices=[9], radius=0.175),
+                ]
+            elif self.test_cfg['dataset'] == 'Waymo':
+                self.tasks = [
+                    dict(num_class=1, class_names=['Car'], indices=[0], radius=0.7),
+                    dict(num_class=1, class_names=['Pedestrian'], indices=[1], radius=0.7),
+                    dict(num_class=1, class_names=['Cyclist'], indices=[2], radius=0.7),
+                ]
 
-                ret_layer = []
-                for i in range(batch_size):
-                    boxes3d = temp[i]['bboxes']
-                    scores = temp[i]['scores']
-                    labels = temp[i]['labels']
-                    ## adopt circle nms for different categories
-                    if self.test_cfg['nms_type'] != None:
-                        keep_mask = torch.zeros_like(scores)
-                        for task in self.tasks:
-                            task_mask = torch.zeros_like(scores)
-                            for cls_idx in task['indices']:
-                                task_mask += labels == cls_idx
-                            task_mask = task_mask.bool()
-                            if task['radius'] > 0:
-                                if self.test_cfg['nms_type'] == 'circle':
-                                    boxes_for_nms = torch.cat([boxes3d[task_mask][:, :2], scores[:, None][task_mask]], dim=1)
-                                    task_keep_indices = torch.tensor(
-                                        circle_nms(
-                                            boxes_for_nms.detach().cpu().numpy(),
-                                            task['radius'],
-                                        )
+            ret_layer = []
+            for i in range(batch_size):
+                boxes3d = temp[i]['bboxes']
+                scores = temp[i]['scores']
+                labels = temp[i]['labels']
+                ## adopt circle nms for different categories
+                if self.test_cfg['nms_type'] != None:
+                    keep_mask = torch.zeros_like(scores)
+                    for task in self.tasks:
+                        task_mask = torch.zeros_like(scores)
+                        for cls_idx in task['indices']:
+                            task_mask += labels == cls_idx
+                        task_mask = task_mask.bool()
+                        if task['radius'] > 0:
+                            if self.test_cfg['nms_type'] == 'circle':
+                                boxes_for_nms = torch.cat([boxes3d[task_mask][:, :2], scores[:, None][task_mask]], dim=1)
+                                task_keep_indices = torch.tensor(
+                                    circle_nms(
+                                        boxes_for_nms.detach().cpu().numpy(),
+                                        task['radius'],
                                     )
-                                else:
-                                    boxes_for_nms = xywhr2xyxyr(img_metas[i]['box_type_3d'](boxes3d[task_mask][:, :7], 7).bev)
-                                    top_scores = scores[task_mask]
-                                    task_keep_indices = torch.arange(task_mask.sum())
-
-                                    # task_keep_indices = nms_gpu(
-                                    #     boxes_for_nms,
-                                    #     top_scores,
-                                    #     thresh=task['radius'],
-                                    #     pre_maxsize=self.test_cfg['pre_maxsize'],
-                                    #     post_max_size=self.test_cfg['post_maxsize'],
-                                    # )
+                                )
                             else:
+                                boxes_for_nms = xywhr2xyxyr(img_metas[i]['box_type_3d'](boxes3d[task_mask][:, :7], 7).bev)
+                                top_scores = scores[task_mask]
                                 task_keep_indices = torch.arange(task_mask.sum())
-                            if task_keep_indices.shape[0] != 0:
-                                keep_indices = torch.where(task_mask != 0)[0][task_keep_indices]
-                                keep_mask[keep_indices] = 1
-                        keep_mask = keep_mask.bool()
-                        ret = dict(bboxes=boxes3d[keep_mask], scores=scores[keep_mask], labels=labels[keep_mask])
-                    else:  # no nms
-                        ret = dict(bboxes=boxes3d, scores=scores, labels=labels)
-                    ret_layer.append(ret)
-                rets.append(ret_layer)
-            assert len(rets) == 1
-            assert len(rets[0]) == 1
-            res = [[
-                img_metas[0]['box_type_3d'](rets[0][0]['bboxes'], box_dim=rets[0][0]['bboxes'].shape[-1]),
-                rets[0][0]['scores'],
-                rets[0][0]['labels'].int()
-            ]]
-            return res
+
+                                # task_keep_indices = nms_gpu(
+                                #     boxes_for_nms,
+                                #     top_scores,
+                                #     thresh=task['radius'],
+                                #     pre_maxsize=self.test_cfg['pre_maxsize'],
+                                #     post_max_size=self.test_cfg['post_maxsize'],
+                                # )
+                        else:
+                            task_keep_indices = torch.arange(task_mask.sum())
+                        if task_keep_indices.shape[0] != 0:
+                            keep_indices = torch.where(task_mask != 0)[0][task_keep_indices]
+                            keep_mask[keep_indices] = 1
+                    keep_mask = keep_mask.bool()
+                    ret = dict(bboxes=boxes3d[keep_mask], scores=scores[keep_mask], labels=labels[keep_mask])
+                else:  # no nms
+                    ret = dict(bboxes=boxes3d, scores=scores, labels=labels)
+                ret_layer.append(ret)
+            rets.append(ret_layer)
+        assert len(rets) == 1
+        assert len(rets[0]) == 1
+        res = [[
+            img_metas[0]['box_type_3d'](rets[0][0]['bboxes'], box_dim=rets[0][0]['bboxes'].shape[-1]),
+            rets[0][0]['scores'],
+            rets[0][0]['labels'].int()
+        ]]
+        return res
