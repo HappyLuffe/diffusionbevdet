@@ -945,19 +945,6 @@ class DiffusionBEVHead(nn.Module):
             # layer_iou_target = ious[..., idx_layer*self.num_proposals:(idx_layer+1)*self.num_proposals]
             # layer_loss_iou = self.loss_iou(layer_iou, layer_iou_target, layer_bbox_weights.max(-1).values, avg_factor=max(num_pos, 1))
 
-            # test
-            # rots = bbox_targets[:,idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals,6:7]
-            # rotc = bbox_targets[:,idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals,7:8]
-            # rot = torch.atan2(rots,rotc)
-            # bbox_targets_rot = torch.cat((bbox_targets[:, idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals, :6], rot), 2).view(-1, 7)
-            
-            # rots = preds[:,:,6:7]
-            # rotc = preds[:,:,7:8]
-            # rot = torch.atan2(rots,rotc)
-            # preds_rot = torch.cat((preds[:, :, :6], rot), 2).view(-1, 7)
-
-            # layer_loss_iou = self.loss_iou(preds_rot, bbox_targets_rot,  layer_reg_weights.reshape(-1, 8)[:, :7], avg_factor=max(num_pos, 1))
-            # loss_dict[f'{prefix}_loss_iou'] = layer_loss_iou
 
 
             loss_dict[f'{prefix}_loss_cls'] = layer_loss_cls
