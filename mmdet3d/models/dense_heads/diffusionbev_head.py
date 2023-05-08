@@ -956,9 +956,9 @@ class DiffusionBEVHead(nn.Module):
             # rot = torch.atan2(rots,rotc)
             # preds_rot = torch.cat((preds[:, :, :6], rot), 2).view(-1, 7)
 
-            # layer_loss_iou = self.loss_iou(preds_rot, bbox_targets_rot,  layer_bbox_weights.reshape(-1, 8)[:, :7], avg_factor=max(num_pos, 1))
-
+            # layer_loss_iou = self.loss_iou(preds_rot, bbox_targets_rot,  layer_reg_weights.reshape(-1, 8)[:, :7], avg_factor=max(num_pos, 1))
             # loss_dict[f'{prefix}_loss_iou'] = layer_loss_iou
+
 
             loss_dict[f'{prefix}_loss_cls'] = layer_loss_cls
             loss_dict[f'{prefix}_loss_bbox'] = layer_loss_bbox
