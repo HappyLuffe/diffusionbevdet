@@ -730,7 +730,7 @@ class DiffusionBEVHead(nn.Module):
         self.img_feat_pos = None
         self.img_feat_collapsed_pos = None
 
-        self.query_linear = torch.nn.Linear(25088, 128)
+        # self.query_linear = torch.nn.Linear(25088, 128)
 
     def create_2D_grid(self, x_size, y_size):
         meshgrid = [[0, x_size - 1, x_size], [0, y_size - 1, y_size]]

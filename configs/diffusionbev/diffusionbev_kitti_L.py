@@ -237,9 +237,8 @@ model = dict(
             code_size=8,
         ),
         loss_cls=dict(type='FocalLoss', use_sigmoid=True, gamma=2, alpha=0.25, reduction='mean', loss_weight=1.0),
-        loss_iou=dict(type='CrossEntropyLoss', use_sigmoid=True, reduction='mean', loss_weight=0.0),
+        # loss_iou=dict(type='CrossEntropyLoss', use_sigmoid=True, reduction='mean', loss_weight=0.0),
         # loss_iou=dict(type='RotatedIoU3DLoss', reduction='mean', loss_weight=1.0),
-
         loss_bbox=dict(type='L1Loss', reduction='mean', loss_weight=1.0),
         loss_heatmap=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=1.0),
 
