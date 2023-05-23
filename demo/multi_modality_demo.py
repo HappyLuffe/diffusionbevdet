@@ -4,7 +4,6 @@ from argparse import ArgumentParser
 from mmdet3d.apis import (inference_multi_modality_detector, init_model,
                           show_result_meshlab)
 
-
 def main():
     parser = ArgumentParser()
     parser.add_argument('pcd', help='Point cloud file')

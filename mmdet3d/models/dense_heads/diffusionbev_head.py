@@ -839,8 +839,17 @@ class DiffusionBEVHead(nn.Module):
                 local_max[:, 1, ] = F.max_pool2d(heatmap[:, 1], kernel_size=1, stride=1, padding=0)
                 local_max[:, 2, ] = F.max_pool2d(heatmap[:, 2], kernel_size=1, stride=1, padding=0)
             heatmap = heatmap * (heatmap == local_max)
+
+            # todo 在这里加噪声
+            noise = torch.randn_like(heatmap) / 10
+            noise = torch.clamp(noise, min=-0.1, max=0.1)
+            heatmap += noise
+
+
             heatmap = heatmap.view(batch_size, heatmap.shape[1], -1)
 
+            
+            
             # top #num_proposals among all classes
             top_proposals = heatmap.view(batch_size, -1).argsort(dim=-1, descending=True)[..., :self.num_proposals]
             top_proposals_class = top_proposals // heatmap.shape[-1]

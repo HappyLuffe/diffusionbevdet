@@ -60,7 +60,6 @@ def drawlidar(xy):
 
     plt.savefig('out/lidar.png')
 
-# todo有bug需要修改
 def addheight(bboxes, labels):
     batch_size = bboxes.shape[0]
     bboxes = bboxes.cpu().numpy()
